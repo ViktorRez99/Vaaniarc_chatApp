@@ -1,5 +1,6 @@
-function App() {
-  const { useState, useRef } = React;
+import { useState, useRef } from 'react';
+
+export default function Settings() {
   const [activeSection, setActiveSection] = useState("profile");
   const [isEditing, setIsEditing] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState('');
@@ -1357,4 +1358,4 @@ function App() {
       </div>
     </div>
   );
-}
+}
