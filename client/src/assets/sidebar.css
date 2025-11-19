@@ -1,0 +1,224 @@
+/* Sidebar responsive utilities */
+.sidebar-responsive {
+  @apply transition-all duration-500 ease-out;
+}
+
+.sidebar-collapsed {
+  @apply w-16 md:w-20;
+}
+
+.sidebar-expanded {
+  @apply w-80 md:w-96 lg:w-[400px];
+}
+
+.sidebar-mobile-overlay {
+  @apply fixed inset-y-0 left-0 w-80;
+}
+
+/* Enhanced touch targets for mobile */
+@media (max-width: 767px) {
+  .touch-target {
+    @apply min-h-[44px] min-w-[44px];
+  }
+  
+  .sidebar-button {
+    @apply p-4 text-lg;
+  }
+}
+
+/* Prevent scrolling when sidebar overlay is active */
+.scroll-lock {
+  overflow: hidden;
+}
+
+/* Animation improvements */
+.animate-slide-in-left {
+  animation: slide-in-left 0.3s ease-out forwards;
+}
+
+.animate-slide-out-left {
+  animation: slide-out-left 0.3s ease-in forwards;
+}
+
+@keyframes slide-in-left {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slide-out-left {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+}
+
+/* Better backdrop blur support */
+.backdrop-blur-enhanced {
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  background-color: rgba(0, 0, 0, 0.6);
+}
+
+/* Z-index management */
+.z-sidebar-overlay {
+  z-index: 40;
+}
+
+.z-sidebar {
+  z-index: 50;
+}
+
+.z-dropdown {
+  z-index: 101;
+}
+
+.z-dropdown-backdrop {
+  z-index: 100;
+}
+
+/* Settings menu specific styles */
+.settings-menu {
+  position: fixed;
+  right: 20px;
+  top: 80px;
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  z-index: 100000;
+  transform-origin: top right;
+  animation: settings-menu-enter 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  pointer-events: auto;
+}
+
+/* Ensure all interactive elements inside the settings menu work */
+.settings-menu button,
+.settings-menu input,
+.settings-menu select,
+.settings-menu textarea,
+.settings-menu a,
+.settings-menu [role="button"] {
+  pointer-events: auto !important;
+  cursor: pointer;
+  position: relative;
+  z-index: 1;
+}
+
+/* Ensure all content inside the settings menu is interactive */
+.settings-menu * {
+  pointer-events: auto;
+}
+
+/* Tablet responsive positioning */
+@media (max-width: 768px) {
+  .settings-menu {
+    right: 16px;
+    top: 75px;
+    width: 360px;
+    max-width: calc(100vw - 32px);
+  }
+}
+
+/* Mobile responsive positioning */
+@media (max-width: 480px) {
+  .settings-menu {
+    right: 12px;
+    left: 12px;
+    top: 70px;
+    width: auto;
+    max-width: none;
+  }
+}
+
+/* Small mobile screens */
+@media (max-width: 320px) {
+  .settings-menu {
+    right: 4px;
+    left: 4px;
+    top: 55px;
+  }
+}
+
+/* Prevent menu from going off-screen on smaller viewports */
+@media (max-height: 700px) {
+  .settings-menu {
+    top: 50px;
+    max-height: calc(100vh - 80px);
+    overflow-y: auto;
+  }
+}
+
+@media (max-height: 600px) {
+  .settings-menu {
+    top: 40px;
+    max-height: calc(100vh - 60px);
+    overflow-y: auto;
+  }
+}
+
+/* Very short screens */
+@media (max-height: 500px) {
+  .settings-menu {
+    top: 30px;
+    max-height: calc(100vh - 40px);
+  }
+}
+
+@keyframes settings-menu-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+    filter: blur(8px);
+  }
+  50% {
+    opacity: 0.8;
+    transform: scale(1.02);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+}
+
+/* Enhanced backdrop for settings menu */
+.settings-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  z-index: 99998;
+  animation: backdrop-fade-in 0.2s ease-out;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+/* Ensure backdrop doesn't interfere with modal content */
+.settings-backdrop:hover {
+  cursor: pointer;
+}
+
+@keyframes backdrop-fade-in {
+  from {
+    opacity: 0;
+    -webkit-backdrop-filter: blur(0);
+    backdrop-filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
+}
