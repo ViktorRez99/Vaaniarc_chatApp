@@ -133,7 +133,7 @@ class ApiService {
 
   async updateProfile(profileData) {
     return this.apiCall('/auth/profile', {
-      method: 'PUT',
+      method: 'PATCH',
       body: JSON.stringify(profileData),
     });
   }

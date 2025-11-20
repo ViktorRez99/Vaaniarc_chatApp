@@ -25,7 +25,7 @@ const generateToken = (userId) => {
 // Register new user
 router.post('/register', authLimiter, async (req, res) => {
   try {
-    const { username, email, password, bio } = req.body;
+    const { username, email, password, bio, firstName, lastName, phone, location, avatar } = req.body;
 
     // Validation
     if (!username || !email || !password) {
@@ -65,7 +65,12 @@ router.post('/register', authLimiter, async (req, res) => {
       username: username.trim(),
       email: email.trim().toLowerCase(),
       password,
-      bio: bio || ''
+      bio: bio || '',
+      firstName: firstName || '',
+      lastName: lastName || '',
+      phone: phone || '',
+      location: location || '',
+      avatar: avatar || null
     });
 
     await user.save();
@@ -81,6 +86,10 @@ router.post('/register', authLimiter, async (req, res) => {
         username: user.username,
         email: user.email,
         bio: user.bio,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: user.phone,
+        location: user.location,
         joinedAt: user.joinedAt
       }
     });
@@ -150,6 +159,10 @@ router.post('/login', authLimiter, async (req, res) => {
         username: user.username,
         email: user.email,
         bio: user.bio,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: user.phone,
+        location: user.location,
         status: user.status,
         lastSeen: user.lastSeen,
         joinedAt: user.joinedAt
@@ -192,6 +205,10 @@ router.get('/profile', authenticateToken, async (req, res) => {
         username: user.username,
         email: user.email,
         bio: user.bio,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: user.phone,
+        location: user.location,
         avatar: user.avatar,
         status: user.status,
         lastSeen: user.lastSeen,
@@ -207,7 +224,7 @@ router.get('/profile', authenticateToken, async (req, res) => {
 // Update user profile (PATCH for partial updates including email)
 router.patch('/profile', authenticateToken, async (req, res) => {
   try {
-    const { username, email, bio } = req.body;
+    const { username, email, bio, firstName, lastName, phone, location } = req.body;
     const user = await User.findById(req.user._id);
 
     if (!user) {
@@ -248,7 +265,7 @@ router.patch('/profile', authenticateToken, async (req, res) => {
       user.email = email.toLowerCase().trim();
     }
 
-    // Update bio
+    // Update other fields
     if (bio !== undefined) {
       if (bio.length > 200) {
         return res.status(400).json({ 
@@ -257,6 +274,11 @@ router.patch('/profile', authenticateToken, async (req, res) => {
       }
       user.bio = bio;
     }
+
+    if (firstName !== undefined) user.firstName = firstName.trim();
+    if (lastName !== undefined) user.lastName = lastName.trim();
+    if (phone !== undefined) user.phone = phone.trim();
+    if (location !== undefined) user.location = location.trim();
 
     await user.save();
 
@@ -267,6 +289,10 @@ router.patch('/profile', authenticateToken, async (req, res) => {
         username: user.username,
         email: user.email,
         bio: user.bio,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: user.phone,
+        location: user.location,
         avatar: user.avatar,
         status: user.status,
         lastSeen: user.lastSeen,
@@ -483,4 +509,4 @@ router.get('/users/search', authenticateToken, async (req, res) => {
   }
 });
 
-module.exports = router;
+module.exports = router;

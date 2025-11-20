@@ -296,10 +296,12 @@ const ChatsPage = () => {
               setShowUserList(!showUserList);
               if (!showUserList) fetchUsers();
             }}
-            className="mt-3 w-full flex items-center justify-center space-x-2 px-4 py-2.5 bg-[#00a884] rounded-lg hover:bg-[#06cf9c] transition-all"
+            className="mt-3 w-full flex items-center justify-center space-x-2 px-4 py-3 bg-emerald-500/20 backdrop-blur-md border border-emerald-500/30 rounded-2xl hover:bg-emerald-500/30 transition-all shadow-lg group"
           >
-            <Plus className="w-5 h-5" />
-            <span className="font-medium">New Chat</span>
+            <div className="p-1 rounded-full bg-emerald-500/20 group-hover:bg-emerald-500/40 transition-colors">
+              <Plus className="w-5 h-5 text-emerald-400" />
+            </div>
+            <span className="font-medium text-emerald-100">New Chat</span>
           </button>
         </div>
 
@@ -498,13 +500,13 @@ const ChatsPage = () => {
 
       {/* Chat Area */}
       {selectedChat ? (
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Chat Header - WhatsApp Style */}
-          <div className="h-14 md:h-16 px-3 md:px-4 flex items-center justify-between border-b border-[#2a2f32] bg-[#202c33]">          
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative bg-[#0b141a]">
+          {/* Chat Header - Glassy & Floating */}
+          <div className="absolute top-0 left-0 right-0 z-20 h-16 px-4 flex items-center justify-between border-b border-white/5 bg-slate-900/20 backdrop-blur-2xl shadow-sm">          
             <div className="flex items-center space-x-3">
               <button
                 onClick={() => setSelectedChat(null)}
-                className="md:hidden p-2 hover:bg-slate-800/50 rounded-lg"
+                className="md:hidden p-2 hover:bg-white/10 rounded-full transition-colors text-slate-200"
               >
                 <ArrowLeft className="w-5 h-5" />
               </button>
@@ -513,7 +515,7 @@ const ChatsPage = () => {
                   setSelectedUser(getOtherParticipant(selectedChat));
                   setShowProfile(true);
                 }}
-                className="relative flex-shrink-0 bg-gradient-to-br from-indigo-500 to-violet-500 w-9 h-9 md:w-10 md:h-10 rounded-full focus:outline-none focus:ring-2 focus:ring-white/30 flex items-center justify-center"
+                className="relative flex-shrink-0 bg-gradient-to-br from-indigo-500 to-violet-500 w-10 h-10 rounded-full focus:outline-none focus:ring-2 focus:ring-white/20 flex items-center justify-center shadow-lg"
                 title="View profile"
               >
                 {getOtherParticipant(selectedChat)?.avatar ? (
@@ -523,45 +525,49 @@ const ChatsPage = () => {
                     className="w-full h-full rounded-full object-cover"
                   />
                 ) : (
-                  <span className="text-sm font-semibold text-white">
+                  <span className="text-sm font-bold text-white">
                     {getOtherParticipant(selectedChat)?.username?.[0]?.toUpperCase() || 'U'}
                   </span>
                 )}
                 {getOtherParticipant(selectedChat)?.status === 'online' && (
-                  <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-slate-900"></div>
+                  <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-slate-900 shadow-sm"></div>
                 )}
               </button>
-              <div>
-                <p className="font-medium text-[#e9edef]">{getOtherParticipant(selectedChat)?.username || 'User'}</p>
-                <p className="text-xs text-[#8696a0]">
+              <div className="cursor-pointer" onClick={() => {
+                  setSelectedUser(getOtherParticipant(selectedChat));
+                  setShowProfile(true);
+                }}>
+                <p className="font-semibold text-white text-sm md:text-base">{getOtherParticipant(selectedChat)?.username || 'User'}</p>
+                <p className="text-xs text-slate-400 font-medium">
                   {typingUsers.size > 0 
-                    ? `${Array.from(typingUsers).join(', ')} typing...`
+                    ? <span className="text-indigo-400 animate-pulse">typing...</span>
                     : getOtherParticipant(selectedChat)?.status === 'online' 
-                      ? 'Online' 
+                      ? <span className="text-green-400">Online</span> 
                       : 'Offline'}
                 </p>
               </div>
             </div>
-            <div className="flex items-center space-x-2">
-              <button className="p-2 hover:bg-[#2a3942] rounded-full transition-colors text-[#8696a0] hover:text-[#e9edef]">
+            <div className="flex items-center space-x-1">
+              <button className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-slate-300 hover:text-white">
                 <Phone className="w-5 h-5" />
               </button>
-              <button className="p-2 hover:bg-[#2a3942] rounded-full transition-colors text-[#8696a0] hover:text-[#e9edef]">
+              <button className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-slate-300 hover:text-white">
                 <Video className="w-5 h-5" />
+              </button>
+              <button className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-slate-300 hover:text-white">
+                <MoreVertical className="w-5 h-5" />
               </button>
             </div>
           </div>
 
           {/* Messages Area */}
-          <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-3 bg-[#0b141a] bg-opacity-90" style={{backgroundImage: "url('data:image/svg+xml,%3Csvg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\"%3E%3Cpath d=\"M0 0h100v100H0z\" fill=\"%230b141a\"/%3E%3Cpath d=\"M20 20h60v60H20z\" fill=\"%23121a22\" opacity=\".05\"/%3E%3C/svg%3E')", backgroundSize: '40px 40px'}}>
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 pt-20 space-y-3 bg-[#0b141a] bg-opacity-90 custom-scrollbar" style={{backgroundImage: "url('data:image/svg+xml,%3Csvg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\"%3E%3Cpath d=\"M0 0h100v100H0z\" fill=\"%230b141a\"/%3E%3Cpath d=\"M20 20h60v60H20z\" fill=\"%23121a22\" opacity=\".05\"/%3E%3C/svg%3E')", backgroundSize: '40px 40px'}}>
             {/* Encryption Notice */}
-            <div className="flex justify-center mb-4">
-              <div className="bg-[#182229] px-3 py-1.5 rounded-lg shadow-sm">
-                <p className="text-xs text-[#d1d7db] flex items-center gap-1">
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="#8696a0" className="flex-shrink-0">
-                    <path d="M6 0L7.5 4.5L12 6L7.5 7.5L6 12L4.5 7.5L0 6L4.5 4.5L6 0Z" />
-                  </svg>
-                  <span>Messages are end-to-end encrypted. No one outside of this chat can read them.</span>
+            <div className="flex justify-center mb-6 mt-2">
+              <div className="bg-slate-900/50 backdrop-blur-sm border border-white/5 px-4 py-2 rounded-xl shadow-sm">
+                <p className="text-xs text-slate-400 flex items-center gap-1.5 font-medium">
+                  <Zap className="w-3 h-3 text-yellow-500" />
+                  <span>Messages are end-to-end encrypted.</span>
                 </p>
               </div>
             </div>
