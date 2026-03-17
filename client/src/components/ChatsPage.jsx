@@ -24,8 +24,17 @@ const ChatsPage = () => {
   const [selectedUser, setSelectedUser] = useState(null);
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [callStatus, setCallStatus] = useState(null);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const selectedChatRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const audioInputRef = useRef(null);
+  
+  // Keep the ref in sync with state
+  useEffect(() => {
+    selectedChatRef.current = selectedChat;
+  }, [selectedChat]);
 
   useEffect(() => {
     fetchChats();
@@ -105,62 +114,158 @@ const ChatsPage = () => {
 
   const setupSocketListeners = () => {
     socketService.on('private_message', handleNewMessage);
+    socketService.on('message_sent', handleMessageSent);
     socketService.on('user_typing', handleUserTyping);
     socketService.on('user_stop_typing', handleUserStopTyping);
     socketService.on('messages_read', handleMessagesRead);
+    socketService.on('call_request_sent', handleCallRequestSent);
+    socketService.on('incoming_call', handleIncomingCall);
   };
 
   const cleanupSocketListeners = () => {
     socketService.off('private_message', handleNewMessage);
+    socketService.off('message_sent', handleMessageSent);
     socketService.off('user_typing', handleUserTyping);
     socketService.off('user_stop_typing', handleUserStopTyping);
     socketService.off('messages_read', handleMessagesRead);
+    socketService.off('call_request_sent', handleCallRequestSent);
+    socketService.off('incoming_call', handleIncomingCall);
   };
 
   const handleNewMessage = (message) => {
-    if (selectedChat && message.chatId === selectedChat._id) {
-      setMessages(prev => [...prev, message]);
-      markMessagesAsRead(selectedChat._id);
+    // This handler now only receives messages from OTHER users
+    const messageChatId = message.chatId?._id || message.chatId?.toString() || message.chatId;
+    const currentSelectedChat = selectedChatRef.current;
+    const selectedChatId = currentSelectedChat?._id?.toString() || currentSelectedChat?._id;
+    
+    if (currentSelectedChat && messageChatId === selectedChatId) {
+      setMessages(prev => {
+        // Check if message already exists to prevent duplicates
+        const exists = prev.some(m => m._id === message._id);
+        if (exists) return prev;
+        
+        return [...prev, message];
+      });
+      
+      // Mark as read since we're viewing this chat
+      markMessagesAsRead(currentSelectedChat._id);
     }
     
     // Update chat list
     setChats(prev => {
-      const updated = prev.map(chat => 
-        chat._id === message.chatId 
-          ? { ...chat, lastMessage: message, updatedAt: new Date() }
-          : chat
-      );
+      const updated = prev.map(chat => {
+        const chatId = chat._id?.toString() || chat._id;
+        if (chatId === messageChatId) {
+          return { ...chat, lastMessage: message, updatedAt: new Date() };
+        }
+        return chat;
+      });
+      return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+    });
+  };
+
+  // Handle confirmation of our own sent message
+  const handleMessageSent = (message) => {
+    const messageChatId = message.chatId?._id || message.chatId?.toString() || message.chatId;
+    const currentSelectedChat = selectedChatRef.current;
+    const selectedChatId = currentSelectedChat?._id?.toString() || currentSelectedChat?._id;
+    
+    if (currentSelectedChat && messageChatId === selectedChatId) {
+      setMessages(prev => {
+        // Prefer matching by tempId when present to avoid content collisions
+        const optimisticIndexByTemp = prev.findIndex(m => m.isOptimistic && m.tempId && m.tempId === message.tempId);
+        if (optimisticIndexByTemp !== -1) {
+          const updated = [...prev];
+          updated[optimisticIndexByTemp] = { ...message, isOptimistic: false };
+          return updated;
+        }
+
+        // Fallback: match by identical content (legacy)
+        const optimisticIndexByContent = prev.findIndex(m => m.isOptimistic && m.content === message.content);
+        if (optimisticIndexByContent !== -1) {
+          const updated = [...prev];
+          updated[optimisticIndexByContent] = { ...message, isOptimistic: false };
+          return updated;
+        }
+        
+        // If no optimistic message found, check if it already exists
+        const exists = prev.some(m => m._id === message._id);
+        if (exists) return prev;
+        
+        // Add the message if it doesn't exist
+        return [...prev, { ...message, isOptimistic: false }];
+      });
+    }
+    
+    // Update chat list with the sent message
+    setChats(prev => {
+      const updated = prev.map(chat => {
+        const chatId = chat._id?.toString() || chat._id;
+        if (chatId === messageChatId) {
+          return { ...chat, lastMessage: message, updatedAt: new Date() };
+        }
+        return chat;
+      });
       return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
     });
   };
 
   const handleUserTyping = ({ chatId, userId, username }) => {
-    if (selectedChat && chatId === selectedChat._id) {
+    const currentSelectedChat = selectedChatRef.current;
+    if (currentSelectedChat && chatId === currentSelectedChat._id) {
       setTypingUsers(prev => new Set([...prev, username]));
     }
   };
 
   const handleUserStopTyping = ({ chatId, userId }) => {
-    if (selectedChat && chatId === selectedChat._id) {
+    const currentSelectedChat = selectedChatRef.current;
+    if (currentSelectedChat && chatId === currentSelectedChat._id) {
       setTypingUsers(prev => {
         const updated = new Set(prev);
         // Remove by matching user
-        const chat = chats.find(c => c._id === chatId);
-        const typingUser = chat?.participants.find(p => p._id === userId);
-        if (typingUser) {
-          updated.delete(typingUser.username);
-        }
+        setChats(currentChats => {
+          const chat = currentChats.find(c => c._id === chatId);
+          const typingUser = chat?.participants.find(p => p._id === userId);
+          if (typingUser) {
+            updated.delete(typingUser.username);
+          }
+          return currentChats;
+        });
         return updated;
       });
     }
   };
 
   const handleMessagesRead = ({ chatId, readBy }) => {
-    if (selectedChat && chatId === selectedChat._id) {
-      setMessages(prev => prev.map(msg => 
-        msg.sender._id === user._id ? { ...msg, read: true, readAt: new Date() } : msg
-      ));
+    const normalizeId = (val) => {
+      if (!val) return '';
+      if (typeof val === 'object') {
+        if (val._id) return val._id.toString();
+        if (val.id) return val.id.toString();
+      }
+      return val.toString();
+    };
+
+    const currentSelectedChat = selectedChatRef.current;
+    if (currentSelectedChat && chatId === currentSelectedChat._id) {
+      setMessages(prev => prev.map(msg => {
+        const senderId = normalizeId(msg.sender?._id || msg.sender?.id || msg.sender);
+        const currentUserId = normalizeId(user?._id || user?.id);
+        return senderId === currentUserId ? { ...msg, read: true, readAt: new Date() } : msg;
+      }));
     }
+
+    // Also update chat list lastMessage read state
+    setChats(prev => prev.map(chat => {
+      if ((chat._id?.toString() || chat._id) !== chatId) return chat;
+      if (!chat.lastMessage) return chat;
+      const lastSenderId = normalizeId(chat.lastMessage.sender?._id || chat.lastMessage.sender?.id || chat.lastMessage.sender);
+      const currentUserId = normalizeId(user?._id || user?.id);
+      if (lastSenderId === currentUserId) {
+        return { ...chat, lastMessage: { ...chat.lastMessage, read: true, readAt: new Date() } };
+      }
+      return chat;
+    }));
   };
 
   const handleSendMessage = async (e) => {
@@ -170,6 +275,7 @@ const ChatsPage = () => {
 
     try {
       const content = messageInput.trim();
+      const tempId = `temp-${Date.now()}`;
       setMessageInput('');
       
       // Stop typing indicator
@@ -178,14 +284,110 @@ const ChatsPage = () => {
       }
       socketService.emit('typing_stop', { chatId: selectedChat._id });
 
+      // Create optimistic message to show immediately
+      const optimisticMessage = {
+        _id: tempId, // Temporary ID to map server confirmation
+        chatId: selectedChat._id,
+        sender: {
+          _id: user._id,
+          username: user.username,
+          avatar: user.avatar
+        },
+        content,
+        messageType: 'text',
+        createdAt: new Date().toISOString(),
+        read: false,
+        tempId,
+        isOptimistic: true // Flag to identify optimistic messages
+      };
+
+      setMessages(prev => [...prev, optimisticMessage]);
+
       // Send via socket for real-time delivery
       socketService.emit('private_message', {
         chatId: selectedChat._id,
         content,
-        messageType: 'text'
+        messageType: 'text',
+        tempId
       });
     } catch (error) {
       console.error('Error sending message:', error);
+    }
+  };
+
+  const handleStartCall = (callType) => {
+    if (!selectedChat) return;
+    setCallStatus(`Calling ${callType === 'video' ? 'video' : 'audio'}...`);
+    // Clear after 4s
+    setTimeout(() => setCallStatus(null), 4000);
+    socketService.emit('start_call_request', {
+      chatId: selectedChat._id,
+      callType
+    });
+  };
+
+  const handleCallRequestSent = ({ chatId, callType }) => {
+    if (!selectedChat || chatId !== selectedChat._id) return;
+    setCallStatus(`${callType === 'video' ? 'Video' : 'Audio'} call request sent`);
+    setTimeout(() => setCallStatus(null), 3000);
+  };
+
+  const handleIncomingCall = ({ chatId, callType, from }) => {
+    const currentChatId = selectedChatRef.current?._id;
+    if (chatId && currentChatId && chatId !== currentChatId) return;
+    const callerName = from?.username || 'Contact';
+    setCallStatus(`Incoming ${callType === 'video' ? 'video' : 'audio'} call from ${callerName}`);
+    // Lightweight alert for now; real UI can be added later
+    window?.alert?.(`Incoming ${callType} call from ${callerName}`);
+    setTimeout(() => setCallStatus(null), 5000);
+  };
+
+  const uploadAndSendFile = async (file) => {
+    if (!file || !selectedChat) return;
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('chatId', selectedChat._id);
+
+      // Optional tempId to align with message_sent event
+      const tempId = `temp-file-${Date.now()}`;
+      formData.append('tempId', tempId);
+
+      const response = await api.post('/upload/chat-file', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+
+      const savedMessage = response?.data?.data || response?.data || response;
+      if (!savedMessage) return;
+
+      // Optimistically insert if not present
+      setMessages(prev => {
+        const exists = prev.some(m => m._id === savedMessage._id);
+        if (exists) return prev;
+        return [...prev, { ...savedMessage, isOptimistic: false }];
+      });
+
+      // Update chat list
+      setChats(prev => {
+        const updated = prev.map(chat => {
+          const chatId = chat._id?.toString() || chat._id;
+          if (chatId === selectedChat._id) {
+            return { ...chat, lastMessage: savedMessage, updatedAt: new Date() };
+          }
+          return chat;
+        });
+        return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+      });
+    } catch (error) {
+      console.error('Error uploading file:', error);
+    }
+  };
+
+  const handleFileInput = (event) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      uploadAndSendFile(file);
+      event.target.value = '';
     }
   };
 
@@ -221,22 +423,45 @@ const ChatsPage = () => {
     }
   };
 
-  const handleStartChat = async (recipientId) => {
+  const handleStartChat = async (recipientIdOrUser) => {
     try {
+      const recipientId = typeof recipientIdOrUser === 'object' 
+        ? recipientIdOrUser._id 
+        : recipientIdOrUser;
+      const recipientUser = typeof recipientIdOrUser === 'object' 
+        ? recipientIdOrUser 
+        : null;
+      
+      if (recipientUser) {
+        setSelectedUser(recipientUser);
+      }
+      
       const response = await api.post('/chats', { recipientId });
       const chat = response?.data || response;
       
-      // If chat doesn't have populated participants, fetch user details
-      if (!chat?.participants || chat.participants.length === 0) {
+      let otherUser = recipientUser; 
+
+      if (!otherUser && chat?.participants && Array.isArray(chat.participants)) {
+        const currentUserId = user?._id?.toString() || user?._id;
+        otherUser = chat.participants.find(p => {
+          const pId = typeof p === 'object' ? (p._id?.toString() || p._id) : p?.toString();
+          return pId !== currentUserId && typeof p === 'object' && p.username;
+        });
+      }
+      if (!otherUser?.username) {
         try {
           const userResponse = await api.get(`/users/${recipientId}`);
           const recipientUser = userResponse?.data || userResponse;
           if (recipientUser) {
-            setSelectedUser(recipientUser);
+            otherUser = recipientUser;
           }
         } catch (err) {
           console.error('Error fetching recipient details:', err);
         }
+      }
+      
+      if (otherUser) {
+        setSelectedUser(otherUser);
       }
       
       setSelectedChat(chat);
@@ -249,16 +474,39 @@ const ChatsPage = () => {
   };
 
   const getOtherParticipant = (chat) => {
-    if (!chat?.participants || !Array.isArray(chat.participants)) {
-      // If participants aren't loaded, use selectedUser as fallback
-      return selectedUser;
+    if (!chat?.participants || !Array.isArray(chat.participants) || chat.participants.length === 0) {
+      return null;
     }
-    const otherParticipant = chat.participants.find(p => {
-      // Handle both populated and non-populated participant IDs
-      const participantId = typeof p === 'object' ? p._id : p;
-      return participantId !== user?._id;
-    });
-    return otherParticipant || selectedUser;
+    
+    const currentUserId =
+      (user?._id && user._id.toString ? user._id.toString() : user?._id) ||
+      (user?.id && user.id.toString ? user.id.toString() : user?.id) ||
+      '';
+
+    for (const p of chat.participants) {
+      if (typeof p === 'object' && (p._id || p.id)) {
+        const raw = p._id || p.id;
+        const participantId = raw?.toString ? raw.toString() : raw;
+        if (participantId && currentUserId && participantId !== currentUserId) {
+          return p;
+        }
+      } else if (typeof p === 'string') {
+        if (p !== currentUserId) {
+          return null;
+        }
+      }
+    }
+    
+    return null;
+  };
+
+  // Helper to select a chat and update selectedUser correctly
+  const handleSelectChat = (chat) => {
+    const otherUser = getOtherParticipant(chat);
+    if (otherUser) {
+      setSelectedUser(otherUser);
+    }
+    setSelectedChat(chat);
   };
 
   const formatTime = (date) => {
@@ -277,18 +525,19 @@ const ChatsPage = () => {
 
   return (
     <div className="flex h-[calc(100vh-4rem)] bg-[#0b141a] overflow-hidden">
-      {/* Chat List Sidebar - WhatsApp Style */}
-      <div className={`w-full md:w-80 lg:w-96 border-r border-[#2a2f32] flex flex-col bg-[#111b21] flex-shrink-0 ${selectedChat ? 'hidden md:flex' : 'flex'}`}>
+      {/* Chat List Sidebar - Apple Glass Style */}
+      <div className={`w-full md:w-80 lg:w-96 flex flex-col flex-shrink-0 ${selectedChat ? 'hidden md:flex' : 'flex'}`} style={{background: 'linear-gradient(180deg, rgba(30,30,40,0.95) 0%, rgba(15,15,25,0.98) 100%)', backdropFilter: 'blur(40px) saturate(180%)', borderRight: '1px solid rgba(255,255,255,0.08)'}}>
         {/* Search Header */}
-        <div className="p-3 md:p-4 border-b border-white/10">
+        <div className="p-4 md:p-5" style={{background: 'linear-gradient(180deg, rgba(255,255,255,0.03) 0%, transparent 100%)', borderBottom: '1px solid rgba(255,255,255,0.06)'}}>
           <div className="relative">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-[#8696a0]" />
+            <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 w-4 h-4 text-white/40" />
             <input
               type="text"
               placeholder="Search or start new chat"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 bg-[#202c33] border-none rounded-lg text-[#e9edef] placeholder-[#8696a0] focus:outline-none"
+              className="w-full pl-11 pr-4 py-3 rounded-2xl text-white/90 placeholder-white/40 focus:outline-none focus:ring-2 focus:ring-white/20 transition-all"
+              style={{background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(10px)', border: '1px solid rgba(255,255,255,0.08)'}}
             />
           </div>
           <button
@@ -296,12 +545,13 @@ const ChatsPage = () => {
               setShowUserList(!showUserList);
               if (!showUserList) fetchUsers();
             }}
-            className="mt-3 w-full flex items-center justify-center space-x-2 px-4 py-3 bg-emerald-500/20 backdrop-blur-md border border-emerald-500/30 rounded-2xl hover:bg-emerald-500/30 transition-all shadow-lg group"
+            className="mt-4 w-full flex items-center justify-center space-x-2.5 px-4 py-3.5 rounded-2xl transition-all duration-300 group hover:scale-[1.02] active:scale-[0.98]"
+            style={{background: 'linear-gradient(135deg, rgba(34,197,94,0.25) 0%, rgba(16,185,129,0.15) 100%)', backdropFilter: 'blur(20px)', border: '1px solid rgba(34,197,94,0.3)', boxShadow: '0 8px 32px rgba(34,197,94,0.15), inset 0 1px 0 rgba(255,255,255,0.1)'}}
           >
-            <div className="p-1 rounded-full bg-emerald-500/20 group-hover:bg-emerald-500/40 transition-colors">
-              <Plus className="w-5 h-5 text-emerald-400" />
+            <div className="p-1.5 rounded-xl bg-emerald-500/30 group-hover:bg-emerald-500/50 transition-all duration-300" style={{boxShadow: '0 2px 8px rgba(34,197,94,0.3)'}}>
+              <Plus className="w-4 h-4 text-emerald-300" />
             </div>
-            <span className="font-medium text-emerald-100">New Chat</span>
+            <span className="font-semibold text-emerald-200 tracking-wide">New Chat</span>
           </button>
         </div>
 
@@ -349,7 +599,7 @@ const ChatsPage = () => {
                       <Info className="w-4 h-4 text-[#00a884]" />
                     </button>
                     <button
-                      onClick={() => handleStartChat(u._id)}
+                      onClick={() => handleStartChat(u)}
                       className="p-2 bg-[#00a884] hover:bg-[#06cf9c] rounded-full transition-colors"
                       title="Start chat"
                     >
@@ -426,15 +676,15 @@ const ChatsPage = () => {
             </div>
           )
         ) : !showUserList ? (
-          /* Chat List */
-          <div className="flex-1 overflow-y-auto">
+          /* Chat List - Apple Glass Style */
+          <div className="flex-1 overflow-y-auto p-2 space-y-1" style={{background: 'transparent'}}>
             {(chats || []).filter(chat => {
               const other = getOtherParticipant(chat);
-              return other?.username.toLowerCase().includes(searchQuery.toLowerCase());
+              if (!other?.username) return false;
+              return other.username.toLowerCase().includes(searchQuery.toLowerCase());
             }).map((chat) => {
               const otherUser = getOtherParticipant(chat);
               const isSelected = selectedChat?._id === chat._id;
-              // Handle both populated and non-populated sender in lastMessage
               const lastMessageSenderId = typeof chat.lastMessage?.sender === 'object' 
                 ? chat.lastMessage?.sender?._id 
                 : chat.lastMessage?.sender;
@@ -443,51 +693,61 @@ const ChatsPage = () => {
               return (
                 <button
                   key={chat._id}
-                  onClick={() => setSelectedChat(chat)}
-                  className={`w-full flex items-center space-x-3 p-3 border-b border-[#2a2f32] transition-all cursor-pointer ${
+                  onClick={() => handleSelectChat(chat)}
+                  className={`w-full flex items-center space-x-3.5 p-3.5 rounded-2xl transition-all duration-300 cursor-pointer group ${
                     isSelected 
-                      ? 'bg-[#2a3942]' 
-                      : 'hover:bg-[#202c33]'
+                      ? 'scale-[1.02]' 
+                      : 'hover:scale-[1.01]'
                   }`}
+                  style={{
+                    background: isSelected 
+                      ? 'linear-gradient(135deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0.06) 100%)' 
+                      : 'linear-gradient(135deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.02) 100%)',
+                    backdropFilter: 'blur(20px)',
+                    border: isSelected ? '1px solid rgba(255,255,255,0.15)' : '1px solid rgba(255,255,255,0.05)',
+                    boxShadow: isSelected 
+                      ? '0 8px 32px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1)' 
+                      : '0 2px 8px rgba(0,0,0,0.1)'
+                  }}
                 >
-                  <div className="relative">
-                    <div className="w-12 h-12 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500 flex items-center justify-center">
+                  <div className="relative flex-shrink-0">
+                    <div className="w-14 h-14 rounded-2xl flex items-center justify-center overflow-hidden" style={{background: 'linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%)', boxShadow: '0 4px 16px rgba(99,102,241,0.4), inset 0 1px 0 rgba(255,255,255,0.2)'}}>
                       {otherUser?.avatar ? (
-                        <img src={otherUser.avatar} alt={otherUser.username} className="w-full h-full rounded-full object-cover" />
+                        <img src={otherUser.avatar} alt={otherUser.username} className="w-full h-full object-cover" />
                       ) : (
-                        <span className="text-lg font-semibold">{otherUser?.username[0].toUpperCase()}</span>
+                        <span className="text-xl font-bold text-white" style={{textShadow: '0 2px 4px rgba(0,0,0,0.2)'}}>{otherUser?.username[0].toUpperCase()}</span>
                       )}
                     </div>
                     {otherUser?.status === 'online' && (
-                      <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-slate-900"></div>
+                      <div className="absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center" style={{background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)', border: '2.5px solid rgba(15,15,25,0.95)', boxShadow: '0 2px 8px rgba(34,197,94,0.5)'}}></div>
                     )}
                   </div>
                   <div className="flex-1 min-w-0 text-left">
-                    <div className="flex items-center justify-between mb-1">
-                      <p className={`font-medium truncate ${hasUnread ? 'text-[#e9edef]' : 'text-[#e9edef]'}`}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <p className={`font-semibold truncate text-[15px] tracking-tight ${hasUnread ? 'text-white' : 'text-white/90'}`}>
                         {otherUser?.username}
                       </p>
                       {chat.lastMessage && (
-                        <span className="text-xs text-[#8696a0]">{formatTime(chat.updatedAt)}</span>
+                        <span className="text-[11px] font-medium text-white/40 ml-2">{formatTime(chat.updatedAt)}</span>
                       )}
                     </div>
                     {chat.lastMessage && (
-                      <div className="flex items-center space-x-1">
+                      <div className="flex items-center space-x-1.5">
                         {lastMessageSenderId === user._id && (
                           chat.lastMessage.read ? (
-                            <CheckCheck className="w-4 h-4 text-blue-400" />
+                            <CheckCheck className="w-4 h-4 text-blue-400 flex-shrink-0" />
                           ) : (
-                            <Check className="w-4 h-4 text-white/40" />
+                            <Check className="w-4 h-4 text-white/30 flex-shrink-0" />
                           )
                         )}
-                        <p className={`text-sm truncate ${hasUnread ? 'text-[#e9edef] font-medium' : 'text-[#8696a0]'}`}>
+                        <p className={`truncate text-[13px] ${hasUnread ? 'text-white/80 font-medium' : 'text-white/50'}`}>
                           {chat.lastMessage.content}
                         </p>
                       </div>
                     )}
                   </div>
                   {hasUnread && (
-                    <div className="w-5 h-5 bg-[#00a884] rounded-full flex items-center justify-center text-xs font-bold text-[#111b21]">
+                    <div className="flex-shrink-0 min-w-[22px] h-[22px] flex items-center justify-center rounded-full text-[11px] font-bold" style={{background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)', color: '#fff', boxShadow: '0 2px 8px rgba(34,197,94,0.4)'}}>
                       1
                     </div>
                   )}
@@ -502,6 +762,10 @@ const ChatsPage = () => {
       {selectedChat ? (
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative bg-[#0b141a]">
           {/* Chat Header - Glassy & Floating */}
+          {(() => {
+            // Get the other participant, fall back to selectedUser if not available from chat
+            const chatPartner = getOtherParticipant(selectedChat) || selectedUser;
+            return (
           <div className="absolute top-0 left-0 right-0 z-20 h-16 px-4 flex items-center justify-between border-b border-white/5 bg-slate-900/20 backdrop-blur-2xl shadow-sm">          
             <div className="flex items-center space-x-3">
               <button
@@ -512,56 +776,72 @@ const ChatsPage = () => {
               </button>
               <button
                 onClick={() => {
-                  setSelectedUser(getOtherParticipant(selectedChat));
+                  if (chatPartner) setSelectedUser(chatPartner);
                   setShowProfile(true);
                 }}
                 className="relative flex-shrink-0 bg-gradient-to-br from-indigo-500 to-violet-500 w-10 h-10 rounded-full focus:outline-none focus:ring-2 focus:ring-white/20 flex items-center justify-center shadow-lg"
                 title="View profile"
               >
-                {getOtherParticipant(selectedChat)?.avatar ? (
+                {chatPartner?.avatar ? (
                   <img
-                    src={getOtherParticipant(selectedChat).avatar}
-                    alt={getOtherParticipant(selectedChat)?.username || 'User'}
+                    src={chatPartner.avatar}
+                    alt={chatPartner?.username || 'User'}
                     className="w-full h-full rounded-full object-cover"
                   />
                 ) : (
                   <span className="text-sm font-bold text-white">
-                    {getOtherParticipant(selectedChat)?.username?.[0]?.toUpperCase() || 'U'}
+                    {chatPartner?.username?.[0]?.toUpperCase() || 'U'}
                   </span>
                 )}
-                {getOtherParticipant(selectedChat)?.status === 'online' && (
+                {chatPartner?.status === 'online' && (
                   <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-slate-900 shadow-sm"></div>
                 )}
               </button>
               <div className="cursor-pointer" onClick={() => {
-                  setSelectedUser(getOtherParticipant(selectedChat));
+                  if (chatPartner) setSelectedUser(chatPartner);
                   setShowProfile(true);
                 }}>
-                <p className="font-semibold text-white text-sm md:text-base">{getOtherParticipant(selectedChat)?.username || 'User'}</p>
+                <p className="font-semibold text-white text-sm md:text-base">{chatPartner?.username || 'User'}</p>
                 <p className="text-xs text-slate-400 font-medium">
                   {typingUsers.size > 0 
                     ? <span className="text-indigo-400 animate-pulse">typing...</span>
-                    : getOtherParticipant(selectedChat)?.status === 'online' 
+                    : chatPartner?.status === 'online' 
                       ? <span className="text-green-400">Online</span> 
                       : 'Offline'}
                 </p>
               </div>
             </div>
             <div className="flex items-center space-x-1">
-              <button className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-slate-300 hover:text-white">
+              <button
+                type="button"
+                onClick={() => handleStartCall('audio')}
+                className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-slate-300 hover:text-white"
+                title="Audio call"
+              >
                 <Phone className="w-5 h-5" />
               </button>
-              <button className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-slate-300 hover:text-white">
+              <button
+                type="button"
+                onClick={() => handleStartCall('video')}
+                className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-slate-300 hover:text-white"
+                title="Video call"
+              >
                 <Video className="w-5 h-5" />
-              </button>
-              <button className="p-2.5 hover:bg-white/10 rounded-full transition-colors text-slate-300 hover:text-white">
-                <MoreVertical className="w-5 h-5" />
               </button>
             </div>
           </div>
+            );
+          })()}
 
           {/* Messages Area */}
           <div className="flex-1 overflow-y-auto p-4 md:p-6 pt-20 space-y-3 bg-[#0b141a] bg-opacity-90 custom-scrollbar" style={{backgroundImage: "url('data:image/svg+xml,%3Csvg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\"%3E%3Cpath d=\"M0 0h100v100H0z\" fill=\"%230b141a\"/%3E%3Cpath d=\"M20 20h60v60H20z\" fill=\"%23121a22\" opacity=\".05\"/%3E%3C/svg%3E')", backgroundSize: '40px 40px'}}>
+            {callStatus && (
+              <div className="flex justify-center">
+                <div className="px-4 py-2 mb-3 rounded-full bg-white/10 text-white text-sm shadow-lg backdrop-blur-xl border border-white/10">
+                  {callStatus}
+                </div>
+              </div>
+            )}
             {/* Encryption Notice */}
             <div className="flex justify-center mb-6 mt-2">
               <div className="bg-slate-900/50 backdrop-blur-sm border border-white/5 px-4 py-2 rounded-xl shadow-sm">
@@ -572,9 +852,19 @@ const ChatsPage = () => {
               </div>
             </div>
             {(messages || []).map((message, index) => {
-              // Check if message is from current user - handle both populated and non-populated sender
-              const senderId = typeof message?.sender === 'object' ? message?.sender?._id : message?.sender;
-              const isOwn = senderId === user?._id;
+              // Normalize ids so own messages stay on the right after refresh
+              const normalizeId = (val) => {
+                if (!val) return '';
+                if (typeof val === 'object') {
+                  if (val._id) return val._id.toString();
+                  if (val.id) return val.id.toString();
+                }
+                return val.toString();
+              };
+
+              const senderId = normalizeId(message?.sender?._id || message?.sender?.id || message?.sender);
+              const currentUserId = normalizeId(user?._id || user?.id);
+              const isOwn = senderId === currentUserId;
               const showAvatar = !isOwn && (index === messages.length - 1 || messages[index + 1]?.sender?._id !== message?.sender?._id);
 
               return (
@@ -621,11 +911,24 @@ const ChatsPage = () => {
           {/* Message Input */}
           <div className="p-4 md:p-5 bg-[#0b141a]">          
             <form onSubmit={handleSendMessage} className="flex items-center gap-2">
+              <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileInput} accept="image/*,video/*,audio/*,application/pdf,text/plain" />
+              <input type="file" ref={audioInputRef} className="hidden" onChange={handleFileInput} accept="audio/*" />
+
               <button
                 type="button"
-                className="p-3 bg-slate-900/80/5 backdrop-blur-xl border border-white/10 hover:bg-slate-900/80/10 rounded-2xl transition-all focus:outline-none"
+                onClick={() => fileInputRef.current?.click()}
+                className="p-3 bg-white/5 backdrop-blur-xl border border-white/10 hover:bg-white/10 rounded-2xl transition-all focus:outline-none"
+                title="Send file, image or video"
               >
-                <Paperclip className="w-5 h-5 text-[#8696a0]" />
+                <Paperclip className="w-5 h-5 text-[#e9edef]" />
+              </button>
+              <button
+                type="button"
+                onClick={() => audioInputRef.current?.click()}
+                className="p-3 bg-white/5 backdrop-blur-xl border border-white/10 hover:bg-white/10 rounded-2xl transition-all focus:outline-none"
+                title="Send audio"
+              >
+                <Mic className="w-5 h-5 text-[#e9edef]" />
               </button>
               <div className="flex-1 relative">
                 <input
@@ -638,6 +941,7 @@ const ChatsPage = () => {
                 <button
                   type="button"
                   className="absolute right-4 top-1/2 transform -translate-y-1/2 text-[#8696a0] hover:text-[#e9edef] transition-colors focus:outline-none"
+                  title="Emoji"
                 >
                   <Smile className="w-5 h-5" />
                 </button>
@@ -646,6 +950,7 @@ const ChatsPage = () => {
                 type="submit"
                 disabled={!messageInput.trim()}
                 className="p-3.5 bg-[#00a884] backdrop-blur-xl rounded-2xl hover:bg-[#06cf9c] transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg focus:outline-none"
+                title="Send"
               >
                 <Send className="w-5 h-5" />
               </button>

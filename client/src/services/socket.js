@@ -11,10 +11,11 @@ class SocketService {
       this.disconnect();
     }
 
-    // Use proxy path for development, and support production environment
-    const socketUrl = process.env.NODE_ENV === 'production' 
-      ? window.location.origin 
-      : window.location.origin.replace(':5173', ':3000');
+    // Use environment variable for production, fallback for development
+    const socketUrl = import.meta.env.VITE_SOCKET_URL 
+      || (import.meta.env.MODE === 'production' 
+        ? window.location.origin 
+        : window.location.origin.replace(':5173', ':3000'));
 
     this.socket = io(socketUrl, {
       auth: {

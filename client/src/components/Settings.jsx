@@ -1,11 +1,16 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import apiService from '../services/api';
 
+// Custom navigation helper for the app's routing system
+const navigateTo = (path) => {
+  window.history.pushState({}, '', path);
+  const navEvent = new PopStateEvent('popstate');
+  window.dispatchEvent(navEvent);
+};
+
 export default function Settings() {
   const { user, updateProfile, changePassword, logout } = useAuth();
-  const navigate = useNavigate();
   const [activeSection, setActiveSection] = useState("profile");
   const [isEditing, setIsEditing] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState('');
@@ -204,7 +209,7 @@ export default function Settings() {
   const handleSignOut = async () => {
     try {
       await logout();
-      navigate('/login');
+      navigateTo('/');
     } catch (err) {
       console.error('Logout failed', err);
     }

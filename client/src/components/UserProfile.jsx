@@ -71,7 +71,7 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
       <div className="p-4 border-b border-[#2a2f32] flex items-center justify-around gap-3">
         <button
           onClick={() => {
-            if (onStartChat) onStartChat(user._id);
+            if (onStartChat) onStartChat(user); // Pass the full user object
             onClose();
           }}
           className="flex-1 flex flex-col items-center space-y-1 py-3 bg-[#202c33] hover:bg-[#2a3942] rounded-lg transition-colors focus:outline-none"

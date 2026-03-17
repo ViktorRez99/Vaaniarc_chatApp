@@ -208,6 +208,24 @@ router.post('/chat-file', upload.single('file'), async (req, res) => {
     chat.updatedAt = new Date();
     await chat.save();
 
+    // Broadcast to chat participants (real-time delivery)
+    const io = req.app.get('io');
+    if (io && chat.participants) {
+      chat.participants.forEach(participantId => {
+        const pid = participantId.toString();
+        const uid = req.user._id.toString();
+        if (pid !== uid) {
+          io.to(`user:${pid}`).emit('private_message', message);
+        }
+      });
+
+      // Confirm to sender
+      io.to(`user:${req.user._id}`).emit('message_sent', {
+        ...message.toObject(),
+        tempId: req.body.tempId || null
+      });
+    }
+
     res.status(201).json({
       message: 'File uploaded and message sent successfully',
       data: message,

@@ -4,6 +4,7 @@ import Auth from "./components/Auth"
 import LandingPage from "./components/LandingPage"
 import ChatHub from "./components/ChatHub"
 import ErrorBoundary from "./components/ErrorBoundary"
+import Settings from "./components/Settings"
 
 const LoadingScreen = () => (
   <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-900 to-slate-900 relative overflow-hidden">
@@ -79,6 +80,7 @@ const AppContent = () => {
     // Show landing page for root
     return <LandingPage />
   }
+  
 
   // For authenticated users, check route
   if (path === '/' || path === '/chat' || path.startsWith('/meeting')) {
@@ -88,6 +90,15 @@ const AppContent = () => {
       </div>
     )
   }
+  // If user is at /settings route
+  if (path === '/settings') {
+    return (
+      <div className="min-h-screen w-full">
+        <Settings />
+      </div>
+    )
+  }
+  
 
   // Default to landing page for authenticated users
   return (

@@ -1,5 +1,7 @@
 // API Service for authentication and chat functionality
-const API_BASE_URL = '/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL 
+  ? `${import.meta.env.VITE_API_URL}/api` 
+  : '/api';
 
 class ApiService {
   constructor() {
@@ -47,12 +49,21 @@ class ApiService {
         throw new Error('Network error: Unable to connect to server');
       }
 
+      // Get response text first to handle empty or non-JSON responses
+      const responseText = await response.text();
+      
       let data;
       try {
-        data = await response.json();
+        // Try to parse as JSON
+        data = responseText ? JSON.parse(responseText) : {};
       } catch (parseError) {
+        console.error('Failed to parse response:', responseText?.substring(0, 200));
         if (response.status >= 200 && response.status < 300) {
           return { success: true };
+        }
+        // If it looks like HTML (server error page), show a cleaner message
+        if (responseText?.includes('<!DOCTYPE') || responseText?.includes('<html')) {
+          throw new Error('Server is not responding correctly. Please check if the backend is running.');
         }
         throw new Error('Server error: Invalid response format');
       }

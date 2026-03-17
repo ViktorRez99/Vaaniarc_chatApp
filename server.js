@@ -25,11 +25,16 @@ const io = new Server(server, {
     origin: [
       process.env.FRONTEND_URL || "http://localhost:5174",
       "http://localhost:5173", "http://127.0.0.1:5173", 
-      "http://localhost:3000", "http://127.0.0.1:3000"
+      "http://localhost:3000", "http://127.0.0.1:3000",
+      "https://chatflow-dev.vercel.app",
+      /\.vercel\.app$/
     ],
     credentials: true
   }
 });
+
+// Expose io for routes that need to emit events (e.g., file uploads)
+app.set('io', io);
 
 app.use(helmet({
   contentSecurityPolicy: false,
@@ -46,7 +51,9 @@ app.use(cors({
   origin: [
     process.env.FRONTEND_URL || "http://localhost:5174",
     "http://localhost:5173", "http://127.0.0.1:5173", 
-    "http://localhost:3000", "http://127.0.0.1:3000"
+    "http://localhost:3000", "http://127.0.0.1:3000",
+    "https://chatflow-dev.vercel.app",
+    /\.vercel\.app$/
   ],
   credentials: true
 }));
@@ -58,6 +65,11 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, 'client/dist')));
 }
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Health check endpoint for deployment monitoring
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
 
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/chatapp', {
   useNewUrlParser: true,
@@ -121,9 +133,17 @@ io.on('connection', (socket) => {
       // Populate sender info
       await message.populate('sender', 'username avatar');
 
-      // Send to all participants
+      // Send to all participants EXCEPT the sender (sender already has optimistic message)
       chat.participants.forEach(participantId => {
-        io.to(`user:${participantId}`).emit('private_message', message);
+        if (participantId.toString() !== userId.toString()) {
+          io.to(`user:${participantId}`).emit('private_message', message);
+        }
+      });
+
+      // Send confirmation back to sender with the real message ID
+      socket.emit('message_sent', {
+        ...message.toObject(),
+        tempId: data.tempId // Include tempId if provided for matching
       });
     } catch (error) {
       console.error('Private message error:', error);
@@ -170,6 +190,37 @@ io.on('connection', (socket) => {
       }
     } catch (error) {
       console.error('Typing stop error:', error);
+    }
+  });
+
+  // Handle call requests (lightweight signaling placeholder)
+  socket.on('start_call_request', async (data) => {
+    try {
+      const { chatId, callType = 'audio' } = data;
+      const chat = await Chat.findById(chatId);
+      if (!chat || !chat.participants.includes(userId)) {
+        return; // silently ignore invalid
+      }
+
+      // Notify other participant(s)
+      chat.participants.forEach(participantId => {
+        if (participantId.toString() !== userId.toString()) {
+          io.to(`user:${participantId}`).emit('incoming_call', {
+            chatId,
+            callType,
+            from: {
+              _id: userId,
+              username: socket.user.username,
+              avatar: socket.user.avatar
+            }
+          });
+        }
+      });
+
+      // Acknowledge sender
+      socket.emit('call_request_sent', { chatId, callType });
+    } catch (err) {
+      console.error('Call request error:', err);
     }
   });
 
