@@ -1,0 +1,130 @@
+﻿const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const userSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    minlength: 3,
+    maxlength: 30
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    lowercase: true,
+    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
+  },
+  firstName: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  lastName: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  phone: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  location: {
+    type: String,
+    trim: true,
+    default: ''
+  },
+  password: {
+    type: String,
+    required: true,
+    minlength: 6
+  },
+  avatar: {
+    type: String,
+    default: null
+  },
+  status: {
+    type: String,
+    default: 'offline',
+    enum: ['online', 'offline', 'away', 'busy']
+  },
+  lastSeen: {
+    type: Date,
+    default: Date.now
+  },
+  joinedAt: {
+    type: Date,
+    default: Date.now
+  },
+  bio: {
+    type: String,
+    maxlength: 200,
+    default: ''
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  identityKey: {
+    type: String,
+    default: null
+  },
+  signedPreKey: {
+    keyId: { type: Number, default: 0 },
+    publicKey: { type: String, default: null },
+    signature: { type: String, default: null },
+    timestamp: { type: Date, default: null }
+  },
+  preKeys: [{
+    keyId: Number,
+    publicKey: String
+  }],
+  registrationId: {
+    type: Number,
+    default: null
+  }
+}, {
+  timestamps: true
+});
+
+userSchema.index({ email: 1 });
+userSchema.index({ username: 1 });
+userSchema.index({ status: 1, lastSeen: -1 });
+
+userSchema.pre('save', async function(next) {
+  if (!this.isModified('password')) return next();
+  
+  try {
+    const salt = await bcrypt.genSalt(12);
+    this.password = await bcrypt.hash(this.password, salt);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+userSchema.methods.comparePassword = async function(candidatePassword) {
+  try {
+    return await bcrypt.compare(candidatePassword, this.password);
+  } catch (error) {
+    console.error('Password comparison error:', error);
+    return false;
+  }
+};
+
+userSchema.methods.updateLastSeen = function() {
+  this.lastSeen = new Date();
+  return this.save({ validateBeforeSave: false });
+};
+
+userSchema.methods.toJSON = function() {
+  const user = this.toObject();
+  delete user.password;
+  return user;
+};
+
+module.exports = mongoose.model('User', userSchema);

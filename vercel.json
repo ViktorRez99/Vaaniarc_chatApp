@@ -6,6 +6,18 @@
   "framework": "vite",
   "rewrites": [
     {
+      "source": "/api/:path*",
+      "destination": "https://vaaniarc-server.up.railway.app/api/:path*"
+    },
+    {
+      "source": "/socket.io/:path*",
+      "destination": "https://vaaniarc-server.up.railway.app/socket.io/:path*"
+    },
+    {
+      "source": "/uploads/:path*",
+      "destination": "https://vaaniarc-server.up.railway.app/uploads/:path*"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }

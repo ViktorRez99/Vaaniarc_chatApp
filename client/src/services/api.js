@@ -1,21 +1,54 @@
+import { getCurrentDeviceSnapshot, getOrCreateDeviceId } from '../utils/device';
+
 // API Service for authentication and chat functionality
 const API_BASE_URL = import.meta.env.VITE_API_URL 
   ? `${import.meta.env.VITE_API_URL}/api` 
   : '/api';
+const CSRF_COOKIE_NAME = 'vaaniarc_csrf';
+
+const getCookieValue = (name) => {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  const cookiePrefix = `${name}=`;
+  const cookie = document.cookie
+    .split(';')
+    .map((segment) => segment.trim())
+    .find((segment) => segment.startsWith(cookiePrefix));
+
+  return cookie ? decodeURIComponent(cookie.slice(cookiePrefix.length)) : null;
+};
 
 class ApiService {
   constructor() {
-    this.token = localStorage.getItem('token');
+    this.deviceId = getOrCreateDeviceId();
+  }
+
+  isFormDataBody(body) {
+    return typeof FormData !== 'undefined' && body instanceof FormData;
   }
 
   // Set authorization header
-  getHeaders() {
+  getHeaders(body = null, extraHeaders = {}, method = 'GET') {
     const headers = {
-      'Content-Type': 'application/json',
+      ...extraHeaders,
     };
-    
-    if (this.token) {
-      headers.Authorization = `Bearer ${this.token}`;
+
+    if (!this.isFormDataBody(body) && !headers['Content-Type']) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    if (this.deviceId) {
+      headers['X-Device-Id'] = this.deviceId;
+    }
+
+    const normalizedMethod = String(method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)) {
+      const csrfToken = getCookieValue(CSRF_COOKIE_NAME);
+      if (csrfToken) {
+        headers['X-CSRF-Token'] = csrfToken;
+      }
     }
     
     return headers;
@@ -23,22 +56,32 @@ class ApiService {
 
   // Set token
   setToken(token) {
-    this.token = token;
-    localStorage.setItem('token', token);
+    return token;
   }
 
   // Remove token
   removeToken() {
-    this.token = null;
-    localStorage.removeItem('token');
+    return true;
+  }
+
+  getCurrentDeviceId() {
+    if (!this.deviceId) {
+      this.deviceId = getOrCreateDeviceId();
+    }
+
+    return this.deviceId;
   }
 
   // Generic API call method
   async apiCall(endpoint, options = {}) {
     const url = `${API_BASE_URL}${endpoint}`;
+    const { headers: extraHeaders = {}, body = null, ...restOptions } = options;
+    const method = restOptions.method || 'GET';
     const config = {
-      headers: this.getHeaders(),
-      ...options,
+      ...restOptions,
+      body,
+      credentials: 'include',
+      headers: this.getHeaders(body, extraHeaders, method),
     };
 
     try {
@@ -71,15 +114,14 @@ class ApiService {
       if (!response.ok) {
         // Handle specific error cases
         if (response.status === 401) {
-          // Only remove token if we have one (session expired)
-          // Don't remove token on login/register failures
-          if (this.token && !endpoint.includes('/auth/login') && !endpoint.includes('/auth/register')) {
-            this.removeToken();
-            throw new Error('Session expired. Please login again.');
-          }
-          throw new Error(data.message || 'Authentication failed.');
+          throw new Error(
+            data.message
+            || (endpoint.includes('/auth/login') || endpoint.includes('/auth/register')
+              ? 'Authentication failed.'
+              : 'Session expired. Please sign in again.')
+          );
         } else if (response.status === 403) {
-          throw new Error('Access denied.');
+          throw new Error(data.message || 'Access denied.');
         } else if (response.status === 404) {
           throw new Error('Resource not found.');
         } else if (response.status >= 500) {
@@ -103,39 +145,23 @@ class ApiService {
 
   // Authentication methods
   async register(userData) {
-    const response = await this.apiCall('/auth/register', {
+    return this.apiCall('/auth/register', {
       method: 'POST',
       body: JSON.stringify(userData),
     });
-    
-    if (response.token) {
-      this.setToken(response.token);
-    }
-    
-    return response;
   }
 
   async login(credentials) {
-    const response = await this.apiCall('/auth/login', {
+    return this.apiCall('/auth/login', {
       method: 'POST',
       body: JSON.stringify(credentials),
     });
-    
-    if (response.token) {
-      this.setToken(response.token);
-    }
-    
-    return response;
   }
 
   async logout() {
-    try {
-      await this.apiCall('/auth/logout', {
-        method: 'POST',
-      });
-    } finally {
-      this.removeToken();
-    }
+    return this.apiCall('/auth/logout', {
+      method: 'POST',
+    });
   }
 
   async getProfile() {
@@ -183,6 +209,12 @@ class ApiService {
     return this.apiCall(`/chats/${chatId}/messages`, {
       method: 'POST',
       body: JSON.stringify(messageData),
+    });
+  }
+
+  async consumeViewOnceChatMessage(chatId, messageId) {
+    return this.apiCall(`/chats/${chatId}/messages/${messageId}/consume-view-once`, {
+      method: 'POST',
     });
   }
 
@@ -278,6 +310,12 @@ class ApiService {
     });
   }
 
+  async consumeViewOnceRoomMessage(roomId, messageId) {
+    return this.apiCall(`/rooms/${roomId}/messages/${messageId}/consume-view-once`, {
+      method: 'POST',
+    });
+  }
+
   async deleteRoom(roomId) {
     return this.apiCall(`/rooms/${roomId}`, {
       method: 'DELETE',
@@ -288,6 +326,169 @@ class ApiService {
     return this.apiCall(`/rooms/${roomId}/stats`);
   }
 
+  async getDevices() {
+    return this.apiCall('/devices');
+  }
+
+  async registerDeviceKeyBundle(payload) {
+    return this.apiCall('/keys/devices/register', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getUserDeviceBundles(userId) {
+    return this.apiCall(`/keys/devices/${userId}`);
+  }
+
+  async getKeyTransparencyLog(userId) {
+    return this.apiCall(`/keys/transparency/${userId}`);
+  }
+
+  async consumeUserDevicePrekey(userId, deviceId) {
+    return this.apiCall('/keys/devices/consume-prekey', {
+      method: 'POST',
+      body: JSON.stringify({ userId, deviceId }),
+    });
+  }
+
+  async registerCurrentDevice(identityState = null) {
+    const snapshot = getCurrentDeviceSnapshot();
+    return this.apiCall('/devices', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...snapshot,
+        publicKeyFingerprint: identityState?.fingerprint || identityState?.serverFingerprint || null,
+        identityStatus: identityState?.status || 'unknown'
+      })
+    });
+  }
+
+  async updateCurrentDeviceActivity() {
+    const deviceId = this.getCurrentDeviceId();
+
+    if (!deviceId) {
+      return { skipped: true };
+    }
+
+    return this.apiCall(`/devices/${deviceId}/activity`, {
+      method: 'POST',
+    });
+  }
+
+  async updateDevice(deviceId, payload) {
+    return this.apiCall(`/devices/${deviceId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async revokeDevice(deviceId) {
+    return this.apiCall(`/devices/${deviceId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async getNotificationConfig() {
+    return this.apiCall('/notifications/config');
+  }
+
+  async subscribePushSubscription(subscription) {
+    return this.apiCall('/notifications/subscribe', {
+      method: 'POST',
+      body: JSON.stringify({ subscription }),
+    });
+  }
+
+  async unsubscribePushSubscription() {
+    return this.apiCall('/notifications/subscribe', {
+      method: 'DELETE',
+    });
+  }
+
+  async getConversations() {
+    return this.apiCall('/conversations');
+  }
+
+  async createConversation(payload) {
+    return this.apiCall('/conversations', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getConversationMessages(conversationId, limit = 50, before = null) {
+    const query = before
+      ? `/conversations/${conversationId}/messages?limit=${limit}&before=${before}`
+      : `/conversations/${conversationId}/messages?limit=${limit}`;
+
+    return this.apiCall(query);
+  }
+
+  async getChannels(search = '') {
+    const query = search ? `/channels?search=${encodeURIComponent(search)}` : '/channels';
+    return this.apiCall(query);
+  }
+
+  async getDiscoverChannels(search = '', limit = 20) {
+    const query = search
+      ? `/channels/discover?search=${encodeURIComponent(search)}&limit=${limit}`
+      : `/channels/discover?limit=${limit}`;
+    return this.apiCall(query);
+  }
+
+  async createChannel(channelData) {
+    return this.apiCall('/channels', {
+      method: 'POST',
+      body: JSON.stringify(channelData),
+    });
+  }
+
+  async joinChannel(channelId) {
+    return this.apiCall(`/channels/${channelId}/join`, {
+      method: 'POST',
+    });
+  }
+
+  async getChannelPosts(channelId, limit = 50, before = null) {
+    const query = before
+      ? `/channels/${channelId}/posts?limit=${limit}&before=${before}`
+      : `/channels/${channelId}/posts?limit=${limit}`;
+    return this.apiCall(query);
+  }
+
+  async createChannelPost(channelId, payload) {
+    return this.apiCall(`/channels/${channelId}/posts`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getCommunities(search = '') {
+    const query = search ? `/communities?search=${encodeURIComponent(search)}` : '/communities';
+    return this.apiCall(query);
+  }
+
+  async getDiscoverCommunities(search = '', limit = 20) {
+    const query = search
+      ? `/communities/discover?search=${encodeURIComponent(search)}&limit=${limit}`
+      : `/communities/discover?limit=${limit}`;
+    return this.apiCall(query);
+  }
+
+  async createCommunity(payload) {
+    return this.apiCall('/communities', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async joinCommunity(communityId) {
+    return this.apiCall(`/communities/${communityId}/join`, {
+      method: 'POST',
+    });
+  }
+
   async addReaction(messageId, emoji) {
     return this.apiCall(`/chat/messages/${messageId}/reactions`, {
       method: 'POST',
@@ -296,7 +497,7 @@ class ApiService {
   }
 
   async removeReaction(messageId, emoji) {
-    return this.apiCall(`/chat/messages/${messageId}/reactions/${emoji}`, {
+    return this.apiCall(`/chat/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`, {
       method: 'DELETE',
     });
   }
@@ -315,62 +516,33 @@ class ApiService {
   }
 
   // File upload methods
-  async uploadFile(file, roomId = null, recipientId = null) {
+  async uploadFile(file, roomId = null) {
     const formData = new FormData();
     formData.append('file', file);
     
     if (roomId) {
       formData.append('roomId', roomId);
     }
-    
-    if (recipientId) {
-      formData.append('recipientId', recipientId);
-    }
 
-    const response = await fetch('/api/upload/file', {
+    return this.apiCall('/upload/file', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-      },
       body: formData,
     });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.message || 'File upload failed');
-    }
-
-    return response.json();
   }
 
   async uploadAvatar(file) {
     const formData = new FormData();
     formData.append('avatar', file);
 
-    const response = await fetch('/api/upload/avatar', {
+    return this.apiCall('/upload/avatar', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-      },
       body: formData,
     });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.message || 'Avatar upload failed');
-    }
-
-    return response.json();
   }
 
   // Verify token
   async verifyToken() {
-    try {
-      return await this.apiCall('/auth/verify');
-    } catch (error) {
-      this.removeToken();
-      throw error;
-    }
+    return this.apiCall('/auth/verify');
   }
 
   // Generic HTTP methods for flexibility
@@ -380,30 +552,105 @@ class ApiService {
     });
   }
 
-  async post(endpoint, data) {
+  async put(endpoint, data, options = {}) {
+    const isFormData = this.isFormDataBody(data);
     return this.apiCall(endpoint, {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  }
-
-  async put(endpoint, data) {
-    return this.apiCall(endpoint, {
+      ...options,
       method: 'PUT',
-      body: JSON.stringify(data),
+      body: isFormData ? data : JSON.stringify(data),
     });
   }
 
-  async patch(endpoint, data) {
+  async patch(endpoint, data, options = {}) {
+    const isFormData = this.isFormDataBody(data);
     return this.apiCall(endpoint, {
+      ...options,
       method: 'PATCH',
-      body: JSON.stringify(data),
+      body: isFormData ? data : JSON.stringify(data),
     });
   }
 
-  async delete(endpoint) {
+  async delete(endpoint, options = {}) {
     return this.apiCall(endpoint, {
+      ...options,
       method: 'DELETE',
+    });
+  }
+
+  async post(endpoint, data, options = {}) {
+    const isFormData = this.isFormDataBody(data);
+    return this.apiCall(endpoint, {
+      ...options,
+      method: 'POST',
+      body: isFormData ? data : JSON.stringify(data),
+    });
+  }
+
+  async uploadChatFile(chatId, file, options = {}) {
+    const {
+      tempId = null,
+      encryptedFilePayload = null,
+      expiresInSeconds = null,
+      isViewOnce = false
+    } = options;
+    const formData = new FormData();
+    formData.append('chatId', chatId);
+
+    if (tempId) {
+      formData.append('tempId', tempId);
+    }
+
+    if (encryptedFilePayload) {
+      formData.append('encryptedFilePayload', encryptedFilePayload);
+    }
+
+    if (expiresInSeconds) {
+      formData.append('expiresInSeconds', String(expiresInSeconds));
+    }
+
+    if (isViewOnce) {
+      formData.append('isViewOnce', 'true');
+    }
+
+    formData.append('file', file);
+
+    return this.apiCall('/upload/chat-file', {
+      method: 'POST',
+      body: formData,
+    });
+  }
+
+  async uploadRoomFile(roomId, file, options = {}) {
+    const {
+      tempId = null,
+      encryptedFilePayload = null,
+      expiresInSeconds = null,
+      isViewOnce = false
+    } = options;
+    const formData = new FormData();
+    formData.append('roomId', roomId);
+
+    if (tempId) {
+      formData.append('tempId', tempId);
+    }
+
+    if (encryptedFilePayload) {
+      formData.append('encryptedFilePayload', encryptedFilePayload);
+    }
+
+    if (expiresInSeconds) {
+      formData.append('expiresInSeconds', String(expiresInSeconds));
+    }
+
+    if (isViewOnce) {
+      formData.append('isViewOnce', 'true');
+    }
+
+    formData.append('file', file);
+
+    return this.apiCall('/upload/file', {
+      method: 'POST',
+      body: formData,
     });
   }
 }

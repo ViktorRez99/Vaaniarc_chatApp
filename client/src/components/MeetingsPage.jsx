@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Video, VideoOff, Mic, MicOff, Monitor, MonitorOff,
   Users, Copy, Check, Phone, Settings, Grid, Maximize2,
@@ -7,8 +8,10 @@ import {
 import { useAuth } from '../context/AuthContext';
 import socketService from '../services/socket';
 import api from '../services/api';
+import { idsEqual } from '../utils/identity';
 
-const MeetingsPage = forwardRef((props, ref) => {
+const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [meetings, setMeetings] = useState([]);
   const [activeMeeting, setActiveMeeting] = useState(null);
@@ -44,6 +47,14 @@ const MeetingsPage = forwardRef((props, ref) => {
   }, [user]);
 
   useEffect(() => {
+    if (meetingIdFromRoute && user && !isInMeeting) {
+      joinMeeting(meetingIdFromRoute).catch((error) => {
+        console.error('Error joining meeting from route:', error);
+      });
+    }
+  }, [meetingIdFromRoute, user, isInMeeting]);
+
+  useEffect(() => {
     if (isInMeeting && activeMeeting) {
       setupSocketListeners();
       initializeMedia();
@@ -60,9 +71,10 @@ const MeetingsPage = forwardRef((props, ref) => {
     
     try {
       const response = await api.get('/meetings');
-      setMeetings(response.data);
+      setMeetings(Array.isArray(response) ? response : []);
     } catch (error) {
       console.error('Error fetching meetings:', error);
+      setMeetings([]);
     }
   };
 
@@ -78,7 +90,7 @@ const MeetingsPage = forwardRef((props, ref) => {
         scheduledAt: null
       });
       
-      const meeting = response.data || response;
+      const meeting = response;
       setActiveMeeting(meeting);
       setShowCreateModal(false);
       setMeetingTitle('');
@@ -101,8 +113,12 @@ const MeetingsPage = forwardRef((props, ref) => {
       return;
     }
 
+    const normalizedMeetingId = joinMeetingId.includes('/meeting/')
+      ? joinMeetingId.split('/meeting/').pop().split(/[?#]/)[0]
+      : joinMeetingId.trim();
+
     try {
-      await joinMeeting(joinMeetingId.trim());
+      await joinMeeting(normalizedMeetingId);
       setShowJoinModal(false);
       setJoinMeetingId('');
     } catch (error) {
@@ -114,14 +130,16 @@ const MeetingsPage = forwardRef((props, ref) => {
   const joinMeeting = async (meetingId) => {
     try {
       const response = await api.post(`/meetings/${meetingId}/join`);
-      const meeting = response.data || response;
+      const meeting = response;
       setActiveMeeting(meeting);
       setIsInMeeting(true);
+      navigate(`/meeting/${meeting.meetingId}`);
       
       // Emit socket event
       socketService.emit('join_meeting', { meetingId });
     } catch (error) {
       console.error('Error joining meeting:', error);
+      throw error;
     }
   };
 
@@ -135,6 +153,7 @@ const MeetingsPage = forwardRef((props, ref) => {
       cleanupMedia();
       setIsInMeeting(false);
       setActiveMeeting(null);
+      navigate('/chat?tab=meetings');
       fetchMeetings();
     } catch (error) {
       console.error('Error leaving meeting:', error);
@@ -149,6 +168,7 @@ const MeetingsPage = forwardRef((props, ref) => {
       cleanupMedia();
       setIsInMeeting(false);
       setActiveMeeting(null);
+      navigate('/chat?tab=meetings');
       fetchMeetings();
     } catch (error) {
       console.error('Error ending meeting:', error);
@@ -369,10 +389,10 @@ const MeetingsPage = forwardRef((props, ref) => {
         {/* Video Grid - Google Meet Style */}
         <div className="flex-1 p-6 pt-24 pb-28 overflow-auto relative flex items-center justify-center">
           {/* Other participants' videos - main grid */}
-          {activeMeeting.participants && activeMeeting.participants.filter(p => p.user && String(p.user._id) !== String(user?._id) && !p.leftAt).length > 0 ? (
+          {activeMeeting.participants && activeMeeting.participants.filter(p => p.user && !idsEqual(p.user._id, user?._id) && !p.leftAt).length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full max-w-7xl h-full max-h-full content-center">
               {activeMeeting.participants
-                .filter(p => p.user && String(p.user._id) !== String(user?._id) && !p.leftAt)
+                .filter(p => p.user && !idsEqual(p.user._id, user?._id) && !p.leftAt)
                 .map((participant) => (
                 <div key={participant.user._id} className="relative bg-white/5 backdrop-blur-2xl border border-white/10 rounded-3xl overflow-hidden aspect-video shadow-2xl ring-1 ring-white/5">
                   <div className="absolute inset-0 flex items-center justify-center">
@@ -490,7 +510,7 @@ const MeetingsPage = forwardRef((props, ref) => {
               <span>Leave</span>
             </button>
 
-            {activeMeeting.host === user?._id && (
+            {idsEqual(activeMeeting.host, user?._id) && (
               <button
                 onClick={endMeeting}
                 className="p-4 bg-slate-800/80 hover:bg-slate-700/80 backdrop-blur-md border border-white/10 rounded-full transition-all font-medium text-red-400 hover:text-red-300 hover:scale-105 active:scale-95"
@@ -525,7 +545,7 @@ const MeetingsPage = forwardRef((props, ref) => {
                   <div className="flex-1 min-w-0">
                     <p className="font-medium text-slate-200 truncate">{participant.user.username || 'Unknown'}</p>
                     <p className="text-xs text-slate-500">
-                      {participant.user._id === activeMeeting.host ? 'Host' : 'Participant'}
+                      {idsEqual(participant.user._id, activeMeeting.host) ? 'Host' : 'Participant'}
                     </p>
                   </div>
                   <div className="flex space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">

@@ -1,7 +1,9 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 
 const LandingPage = () => {
+  const navigate = useNavigate();
   const { login, isAuthenticated, logout } = useAuth();
   const [isScrolled, setIsScrolled] = useState(false);
   const [activeFeature, setActiveFeature] = useState(0);
@@ -31,11 +33,10 @@ const LandingPage = () => {
         identifier: "demo",
         password: "demopassword",
       });
-      // Redirect will be handled by the useEffect in App.jsx after login success
+      navigate('/chat');
     } catch (error) {
       console.error("Demo login failed:", error);
-      // If demo login fails, redirect to auth page
-      window.history.pushState({}, '', '/auth');
+      navigate('/auth');
     }
   };
 
@@ -68,8 +69,8 @@ const LandingPage = () => {
       ),
     },
     {
-      title: "Secure Communications",
-      description: "End-to-end encryption and advanced security measures keep your data private.",
+      title: "Encrypted Messaging",
+      description: "Private text messages are encrypted in the browser before they reach the server, so the server does not store plaintext content.",
       icon: (
         <svg className="w-8 h-8" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M12 14.5V16.5M7 10.0288C7.47142 10 8.05259 10 8.8 10H15.2C15.9474 10 16.5286 10 17 10.0288M7 10.0288C6.41168 10.0647 5.99429 10.1455 5.63803 10.327C5.07354 10.6146 4.6146 11.0735 4.32698 11.638C4 12.2798 4 13.1198 4 14.8V16.2C4 17.8802 4 18.7202 4.32698 19.362C4.6146 19.9265 5.07354 20.3854 5.63803 20.673C6.27976 21 7.11984 21 8.8 21H15.2C16.8802 21 17.7202 21 18.362 20.673C18.9265 20.3854 19.3854 19.9265 19.673 19.362C20 18.7202 20 17.8802 20 16.2V14.8C20 13.1198 20 12.2798 19.673 11.638C19.3854 11.0735 18.9265 10.6146 18.362 10.327C18.0057 10.1455 17.5883 10.0647 17 10.0288M7 10.0288V8C7 5.23858 9.23858 3 12 3C14.7614 3 17 5.23858 17 8V10.0288" strokeWidth="1.5" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
@@ -147,8 +148,7 @@ const LandingPage = () => {
           <div className="flex gap-2 pt-4 border-t border-white/10">
             <button 
               onClick={() => {
-                window.history.pushState({}, '', '/auth');
-                window.dispatchEvent(new PopStateEvent('popstate'));
+                navigate('/auth');
                 setMobileMenuOpen(false);
               }} 
               className="flex-1 px-3 py-2.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors border border-blue-500/30"
@@ -157,8 +157,7 @@ const LandingPage = () => {
             </button>
             <button 
               onClick={() => {
-                window.history.pushState({}, '', '/auth?signup=true');
-                window.dispatchEvent(new PopStateEvent('popstate'));
+                navigate('/auth?signup=true');
                 setMobileMenuOpen(false);
               }} 
               className="flex-1 px-3 py-2.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors border border-blue-500/30"
@@ -205,8 +204,7 @@ const LandingPage = () => {
             <div className="flex items-center space-x-4">
               <button 
                 onClick={() => {
-                  window.history.pushState({}, '', '/auth');
-                  window.dispatchEvent(new PopStateEvent('popstate'));
+                  navigate('/auth');
                 }} 
                 className="px-4 py-2 text-sm font-medium text-white hover:text-white/90 transition-colors border border-transparent hover:border-indigo-500/30 rounded-lg hover:bg-indigo-600/10"
               >
@@ -214,8 +212,7 @@ const LandingPage = () => {
               </button>
               <button 
                 onClick={() => {
-                  window.history.pushState({}, '', '/auth?signup=true');
-                  window.dispatchEvent(new PopStateEvent('popstate'));
+                  navigate('/auth?signup=true');
                 }} 
                 className="px-4 py-2 text-sm font-medium bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-lg hover:shadow-lg hover:shadow-violet-500/30 transition-all transform hover:-translate-y-0.5"
               >
@@ -225,8 +222,7 @@ const LandingPage = () => {
                 <>
                   <button 
                     onClick={() => {
-                      window.history.pushState({}, '', '/chat');
-                      window.dispatchEvent(new PopStateEvent('popstate'));
+                      navigate('/chat');
                     }} 
                     className="px-4 py-2 text-sm font-medium bg-green-600 hover:bg-green-700 text-white rounded-lg transition-all"
                   >
@@ -311,8 +307,7 @@ const LandingPage = () => {
               <div className="flex flex-wrap justify-center gap-4 animate-slide-up" style={{ animationDelay: '0.4s' }}>
                 <button 
                   onClick={() => {
-                    window.history.pushState({}, '', '/auth?signup=true');
-                    window.dispatchEvent(new PopStateEvent('popstate'));
+                    navigate('/auth?signup=true');
                   }} 
                   className="px-8 sm:px-10 py-4 bg-gradient-to-br from-indigo-600 to-violet-600 rounded-lg font-medium hover:shadow-lg hover:shadow-violet-500/30 transition-all transform hover:-translate-y-1 relative group overflow-hidden"
                 >

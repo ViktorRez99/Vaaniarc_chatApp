@@ -4,6 +4,12 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: './vitest.setup.js',
+    css: true,
+  },
   build: {
     outDir: 'dist',
     sourcemap: false,
@@ -45,6 +51,12 @@ export default defineConfig({
             console.log('Socket proxy error:', err.message);
           });
         },
+      },
+      '/uploads': {
+        target: process.env.VITE_API_URL || 'http://127.0.0.1:3000',
+        changeOrigin: true,
+        secure: false,
+        timeout: 10000,
       },
     },
   },

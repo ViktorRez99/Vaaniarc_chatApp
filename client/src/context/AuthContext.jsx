@@ -1,6 +1,11 @@
-import React, { createContext, useContext, useReducer, useEffect } from 'react';
+import React, { createContext, useContext, useReducer, useEffect, useState } from 'react';
 import apiService from '../services/api';
 import socketService from '../services/socket';
+import cryptoService from '../services/cryptoService';
+import {
+  clearServerPushSubscription,
+  syncPushSubscription
+} from '../services/notifications';
 
 // Initial state
 const initialState = {
@@ -93,26 +98,62 @@ const AuthContext = createContext();
 // AuthProvider component
 export const AuthProvider = ({ children }) => {
   const [state, dispatch] = useReducer(authReducer, initialState);
+  const [devices, setDevices] = useState([]);
+  const [currentDeviceId, setCurrentDeviceId] = useState(apiService.getCurrentDeviceId());
+  const [encryptionState, setEncryptionState] = useState({
+    status: 'loading',
+    message: 'Checking encryption status...'
+  });
+
+  const syncEncryptionState = async (nextUser) => {
+    const resolvedState = await cryptoService.ensureIdentity(nextUser);
+    setEncryptionState(resolvedState);
+    return resolvedState;
+  };
+
+  const syncCurrentDevice = async (identityState) => {
+    try {
+      await apiService.registerCurrentDevice(identityState);
+      const response = await apiService.getDevices();
+      setDevices(response.devices || []);
+      setCurrentDeviceId(response.currentDeviceId || apiService.getCurrentDeviceId());
+      return response.devices || [];
+    } catch (error) {
+      console.error('Device sync failed:', error);
+      return [];
+    }
+  };
+
+  const syncExistingPushSubscription = async () => {
+    try {
+      await syncPushSubscription({ requestPermission: false });
+    } catch (error) {
+      console.error('Push subscription sync failed:', error);
+    }
+  };
 
   // Check if user is already logged in on app start
   useEffect(() => {
     const checkAuth = async () => {
-      const token = localStorage.getItem('token');
-      if (token) {
-        try {
-          const response = await apiService.verifyToken();
-          dispatch({
-            type: AUTH_ACTIONS.LOGIN_SUCCESS,
-            payload: { user: response.user },
-          });
-          // Connect socket
-          socketService.connect(token);
-        } catch (error) {
-          console.error('Token verification failed:', error);
-          localStorage.removeItem('token');
-          dispatch({ type: AUTH_ACTIONS.LOGOUT });
+      try {
+        const response = await apiService.verifyToken();
+        dispatch({
+          type: AUTH_ACTIONS.LOGIN_SUCCESS,
+          payload: { user: response.user },
+        });
+        const nextEncryptionState = await syncEncryptionState(response.user);
+        await syncCurrentDevice(nextEncryptionState);
+        await syncExistingPushSubscription();
+        socketService.connect();
+      } catch (error) {
+        if (!/session required|access token or session required/i.test(String(error?.message || ''))) {
+          console.error('Session verification failed:', error);
         }
-      } else {
+        setDevices([]);
+        setEncryptionState({
+          status: 'signed_out',
+          message: 'Sign in to enable end-to-end encryption.'
+        });
         dispatch({ type: AUTH_ACTIONS.SET_LOADING, payload: false });
       }
     };
@@ -130,11 +171,10 @@ export const AuthProvider = ({ children }) => {
         type: AUTH_ACTIONS.LOGIN_SUCCESS,
         payload: { user: response.user },
       });
-      // Connect socket after successful login
-      const token = localStorage.getItem('token');
-      if (token) {
-        socketService.connect(token);
-      }
+      const nextEncryptionState = await syncEncryptionState(response.user);
+      await syncCurrentDevice(nextEncryptionState);
+      await syncExistingPushSubscription();
+      socketService.connect();
       return response;
     } catch (error) {
       dispatch({
@@ -155,11 +195,10 @@ export const AuthProvider = ({ children }) => {
         type: AUTH_ACTIONS.REGISTER_SUCCESS,
         payload: { user: response.user },
       });
-      // Connect socket after successful registration
-      const token = localStorage.getItem('token');
-      if (token) {
-        socketService.connect(token);
-      }
+      const nextEncryptionState = await syncEncryptionState(response.user);
+      await syncCurrentDevice(nextEncryptionState);
+      await syncExistingPushSubscription();
+      socketService.connect();
       return response;
     } catch (error) {
       dispatch({
@@ -173,12 +212,20 @@ export const AuthProvider = ({ children }) => {
   // Logout function
   const logout = async () => {
     try {
+      await clearServerPushSubscription();
       await apiService.logout();
     } catch (error) {
       console.error('Logout error:', error);
     } finally {
       // Disconnect socket
       socketService.disconnect();
+      cryptoService.clearActiveIdentity();
+      setDevices([]);
+      setCurrentDeviceId(apiService.getCurrentDeviceId());
+      setEncryptionState({
+        status: 'signed_out',
+        message: 'Sign in to enable end-to-end encryption.'
+      });
       dispatch({ type: AUTH_ACTIONS.LOGOUT });
     }
   };
@@ -213,15 +260,119 @@ export const AuthProvider = ({ children }) => {
     dispatch({ type: AUTH_ACTIONS.CLEAR_ERROR });
   };
 
+  const refreshEncryptionState = async () => {
+    if (!state.user) {
+      const signedOutState = {
+        status: 'signed_out',
+        message: 'Sign in to enable end-to-end encryption.'
+      };
+      setEncryptionState(signedOutState);
+      return signedOutState;
+    }
+
+    const nextEncryptionState = await syncEncryptionState(state.user);
+    await syncCurrentDevice(nextEncryptionState);
+    return nextEncryptionState;
+  };
+
+  const downloadEncryptionBackup = async (passphrase) => {
+    const backup = await cryptoService.downloadIdentityBackup(
+      passphrase,
+      state.user?._id || state.user?.id
+    );
+
+    setEncryptionState((currentState) => ({
+      ...currentState,
+      lastBackupAt: new Date().toISOString()
+    }));
+
+    return backup;
+  };
+
+  const restoreEncryptionBackup = async (serializedBackup, passphrase) => {
+    const restoredState = await cryptoService.importIdentityBackup(
+      serializedBackup,
+      passphrase,
+      state.user?._id || state.user?.id
+    );
+
+    setEncryptionState(restoredState);
+    await syncCurrentDevice(restoredState);
+    return restoredState;
+  };
+
+  const refreshDevices = async () => {
+    if (!state.isAuthenticated) {
+      setDevices([]);
+      return [];
+    }
+
+    const response = await apiService.getDevices();
+    setDevices(response.devices || []);
+    setCurrentDeviceId(response.currentDeviceId || apiService.getCurrentDeviceId());
+    return response.devices || [];
+  };
+
+  const renameDevice = async (deviceId, deviceName) => {
+    const response = await apiService.updateDevice(deviceId, { deviceName });
+    await refreshDevices();
+    return response.device;
+  };
+
+  const revokeDevice = async (deviceId) => {
+    const response = await apiService.revokeDevice(deviceId);
+    await refreshDevices();
+    return response;
+  };
+
+  useEffect(() => {
+    if (!state.isAuthenticated) {
+      return undefined;
+    }
+
+    const heartbeat = async () => {
+      try {
+        await apiService.updateCurrentDeviceActivity();
+      } catch (error) {
+        console.error('Device heartbeat failed:', error);
+      }
+    };
+
+    heartbeat();
+
+    const intervalId = window.setInterval(heartbeat, 60000);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        heartbeat();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [state.isAuthenticated]);
+
   // Context value
   const value = {
     ...state,
+    encryptionState,
+    devices,
+    currentDeviceId,
     login,
     register,
     logout,
     updateProfile,
     changePassword,
     clearError,
+    refreshEncryptionState,
+    downloadEncryptionBackup,
+    restoreEncryptionBackup,
+    refreshDevices,
+    renameDevice,
+    revokeDevice,
   };
 
   return (
@@ -240,4 +391,4 @@ export const useAuth = () => {
   return context;
 };
 
-export default AuthContext;
+export default AuthContext;

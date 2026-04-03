@@ -1,12 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { MessageCircle, Video, Users, Settings as SettingsIcon, Search, Plus, Zap, LogOut, Archive, FileText, Circle, Check } from 'lucide-react';
 import ChatsPage from './ChatsPage';
 import MeetingsPage from './MeetingsPage';
-import SettingsPage from './Settings';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 
 const ChatHub = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { meetingId } = useParams();
   const [activeTab, setActiveTab] = useState('chats');
   const { user, logout } = useAuth();
   const meetingsPageRef = useRef(null);
@@ -22,6 +25,12 @@ const ChatHub = () => {
       setCurrentStatus(user.status);
     }
   }, [user]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(location.search);
+    const nextTab = meetingId || searchParams.get('tab') === 'meetings' ? 'meetings' : 'chats';
+    setActiveTab(nextTab);
+  }, [location.search, meetingId]);
 
   const handleStatusChange = async (status) => {
     setCurrentStatus(status);
@@ -61,13 +70,18 @@ const ChatHub = () => {
   }, []);
 
   const handleQuickMeeting = async () => {
-    setActiveTab('meetings');
+    navigate('/chat?tab=meetings');
 
     setTimeout(() => {
       if (meetingsPageRef.current) {
         meetingsPageRef.current.startInstantMeeting();
       }
     }, 100);
+  };
+
+  const handleTabChange = (tab) => {
+    setActiveTab(tab);
+    navigate(tab === 'meetings' ? '/chat?tab=meetings' : '/chat');
   };
 
   return (
@@ -86,7 +100,7 @@ const ChatHub = () => {
 
             <div className="flex items-center space-x-2 rounded-2xl px-3 py-2 border border-slate-700 bg-slate-900/80 backdrop-blur-xl">
               <button
-                onClick={() => setActiveTab('chats')}
+                onClick={() => handleTabChange('chats')}
                 className={`flex items-center space-x-2 px-4 md:px-5 py-2 md:py-2.5 rounded-xl text-sm md:text-base font-medium transition-all ${
                   activeTab === 'chats'
                     ? 'text-sky-100 bg-sky-700/60 ring-1 ring-sky-400/70 shadow-md'
@@ -97,7 +111,7 @@ const ChatHub = () => {
                 <span className="hidden sm:inline">Chats</span>
               </button>
               <button
-                onClick={() => setActiveTab('meetings')}
+                onClick={() => handleTabChange('meetings')}
                 className={`flex items-center space-x-2 px-4 md:px-5 py-2 md:py-2.5 rounded-xl text-sm md:text-base font-medium transition-all ${
                   activeTab === 'meetings'
                     ? 'text-sky-100 bg-sky-700/60 ring-1 ring-sky-400/70 shadow-md'
@@ -130,23 +144,62 @@ const ChatHub = () => {
 
                 {showNewChatMenu && (
                   <div className="absolute right-0 mt-2 w-64 bg-slate-900/60 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl overflow-hidden z-50">
-                    <button className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none">
+                    <button
+                      onClick={() => {
+                        window.dispatchEvent(new Event('vaaniarc:open-direct-messages'));
+                        setShowNewChatMenu(false);
+                      }}
+                      className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none"
+                    >
                       <div className="p-1.5 rounded-full bg-sky-500/10 group-hover:bg-sky-500/20 transition-colors">
                         <MessageCircle className="w-4 h-4 text-sky-400" />
                       </div>
                       <span className="font-medium">New Chat</span>
                     </button>
-                    <button className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none">
+                    <button
+                      onClick={() => {
+                        window.dispatchEvent(new Event('vaaniarc:open-groups'));
+                        window.setTimeout(() => {
+                          window.dispatchEvent(new Event('vaaniarc:open-group-creator'));
+                        }, 0);
+                        setShowNewChatMenu(false);
+                      }}
+                      className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none"
+                    >
                       <div className="p-1.5 rounded-full bg-indigo-500/10 group-hover:bg-indigo-500/20 transition-colors">
                         <Users className="w-4 h-4 text-indigo-400" />
                       </div>
                       <span className="font-medium">New Group</span>
                     </button>
-                    <button className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none">
+                    <button
+                      onClick={() => {
+                        window.dispatchEvent(new Event('vaaniarc:open-channels'));
+                        window.setTimeout(() => {
+                          window.dispatchEvent(new Event('vaaniarc:open-channel-creator'));
+                        }, 0);
+                        setShowNewChatMenu(false);
+                      }}
+                      className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none"
+                    >
                       <div className="p-1.5 rounded-full bg-purple-500/10 group-hover:bg-purple-500/20 transition-colors">
                         <FileText className="w-4 h-4 text-purple-400" />
                       </div>
                       <span className="font-medium">New Channel</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        window.dispatchEvent(new Event('vaaniarc:open-channels'));
+                        window.setTimeout(() => {
+                          window.dispatchEvent(new Event('vaaniarc:open-community-creator'));
+                        }, 0);
+                        setShowNewChatMenu(false);
+                      }}
+                      className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none"
+                    >
+                      <div className="p-1.5 rounded-full bg-emerald-500/10 group-hover:bg-emerald-500/20 transition-colors">
+                        <Users className="w-4 h-4 text-emerald-400" />
+                      </div>
+                      <span className="font-medium">New Community</span>
                     </button>
                     
                     <div className="border-t border-white/10 my-1"></div>
@@ -212,7 +265,7 @@ const ChatHub = () => {
                     <div className="py-1">
                       <button
                         onClick={() => {
-                          setActiveTab('settings');
+                          navigate('/settings');
                           setShowUserMenu(false);
                         }}
                         className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none"
@@ -304,7 +357,7 @@ const ChatHub = () => {
                       <button
                         onClick={async () => {
                           await logout();
-                          window.location.href = '/';
+                          navigate('/');
                         }}
                         className="w-full flex items-center space-x-3 px-4 py-2 text-red-400 hover:bg-red-500/10 transition-all text-sm font-medium group bg-transparent border-none"
                       >
@@ -324,8 +377,7 @@ const ChatHub = () => {
 
       <main className="pt-16 md:pt-20">
         {activeTab === 'chats' && <ChatsPage />}
-        {activeTab === 'meetings' && <MeetingsPage ref={meetingsPageRef} />}
-        {activeTab === 'settings' && <SettingsPage user={user} onLogout={logout} onBack={() => setActiveTab('chats')} />}
+        {activeTab === 'meetings' && <MeetingsPage ref={meetingsPageRef} meetingIdFromRoute={meetingId} />}
       </main>
     </div>
   );

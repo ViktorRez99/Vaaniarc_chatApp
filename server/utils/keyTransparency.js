@@ -1,0 +1,90 @@
+const crypto = require('crypto');
+
+const stableStringify = (value) => {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+
+  return JSON.stringify(value);
+};
+
+const sha256Hex = (value) => crypto
+  .createHash('sha256')
+  .update(String(value || ''))
+  .digest('hex');
+
+const buildTransparencyBundleHash = (keyBundle = {}, keyBundleVersion = 2) => sha256Hex(stableStringify({
+  version: Number(keyBundleVersion || 2),
+  algorithm: keyBundle.algorithm || null,
+  fingerprint: keyBundle.fingerprint || null,
+  encryptionPublicKey: keyBundle.encryptionPublicKey || null,
+  signingPublicKey: keyBundle.signingPublicKey || null,
+  signedPreKey: keyBundle.signedPreKey
+    ? {
+        id: keyBundle.signedPreKey.id || null,
+        publicKey: keyBundle.signedPreKey.publicKey || null,
+        signature: keyBundle.signedPreKey.signature || null
+      }
+    : null,
+  oneTimePreKeys: Array.isArray(keyBundle.oneTimePreKeys)
+    ? keyBundle.oneTimePreKeys.map((preKey) => ({
+        id: preKey.id || null,
+        publicKey: preKey.publicKey || null
+      }))
+    : []
+}));
+
+const buildTransparencyPayload = ({
+  userId,
+  deviceId,
+  action,
+  fingerprint,
+  bundleHash,
+  keyBundleVersion,
+  occurredAt
+}) => ({
+  userId: String(userId || ''),
+  deviceId: String(deviceId || ''),
+  action: String(action || ''),
+  fingerprint: fingerprint || null,
+  bundleHash: bundleHash || null,
+  keyBundleVersion: Number(keyBundleVersion || 2),
+  occurredAt: new Date(occurredAt || new Date()).toISOString()
+});
+
+const buildTransparencyEntryHash = ({ previousEntryHash = null, payload }) => sha256Hex(
+  `${previousEntryHash || 'root'}:${stableStringify(payload)}`
+);
+
+const verifyTransparencyChain = (entries = []) => {
+  let previousEntryHash = null;
+
+  for (const entry of entries) {
+    const payload = buildTransparencyPayload(entry);
+    const expectedHash = buildTransparencyEntryHash({
+      previousEntryHash,
+      payload
+    });
+
+    if (entry.previousEntryHash !== previousEntryHash || entry.entryHash !== expectedHash) {
+      return false;
+    }
+
+    previousEntryHash = entry.entryHash;
+  }
+
+  return true;
+};
+
+module.exports = {
+  buildTransparencyBundleHash,
+  buildTransparencyEntryHash,
+  buildTransparencyPayload,
+  stableStringify,
+  verifyTransparencyChain
+};

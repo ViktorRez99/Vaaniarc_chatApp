@@ -1,16 +1,30 @@
 import { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import apiService from '../services/api';
-
-// Custom navigation helper for the app's routing system
-const navigateTo = (path) => {
-  window.history.pushState({}, '', path);
-  const navEvent = new PopStateEvent('popstate');
-  window.dispatchEvent(navEvent);
-};
+import {
+  disablePushNotifications,
+  getPushStatus,
+  syncPushSubscription
+} from '../services/notifications';
 
 export default function Settings() {
-  const { user, updateProfile, changePassword, logout } = useAuth();
+  const navigate = useNavigate();
+  const {
+    user,
+    updateProfile,
+    changePassword,
+    logout,
+    encryptionState,
+    devices,
+    currentDeviceId,
+    refreshEncryptionState,
+    downloadEncryptionBackup,
+    restoreEncryptionBackup,
+    refreshDevices,
+    renameDevice,
+    revokeDevice
+  } = useAuth();
   const [activeSection, setActiveSection] = useState("profile");
   const [isEditing, setIsEditing] = useState(false);
   const [avatarUrl, setAvatarUrl] = useState('');
@@ -46,27 +60,29 @@ export default function Settings() {
     messages: true,
     meetings: false
   });
+  const [pushStatus, setPushStatus] = useState({
+    supported: false,
+    enabled: false,
+    permission: 'default',
+    serverConfigured: false
+  });
+  const [pushToggleLoading, setPushToggleLoading] = useState(false);
   const [theme, setTheme] = useState('system');
   const [fontType, setFontType] = useState('inter');
   const [fontSize, setFontSize] = useState(16);
   const fileInputRef = useRef(null);
+  const backupFileInputRef = useRef(null);
 
   // Privacy & Security States
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [showSessionsExpanded, setShowSessionsExpanded] = useState(false);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
   const [passwordData, setPasswordData] = useState({
     currentPassword: '',
     newPassword: '',
     confirmPassword: ''
   });
-
-  // Mock active sessions data (Backend integration pending for sessions)
-  const [activeSessions, setActiveSessions] = useState([
-    { id: 1, device: 'Chrome on Windows', location: 'San Francisco, CA', lastActive: '2 minutes ago', current: true },
-    { id: 2, device: 'Safari on iPhone', location: 'San Francisco, CA', lastActive: '1 hour ago', current: false },
-    { id: 3, device: 'Firefox on MacBook', location: 'New York, NY', lastActive: '2 days ago', current: false }
-  ]);
 
   // Cartoonish avatar options
   const avatarOptions = [
@@ -104,6 +120,54 @@ export default function Settings() {
     }
   }, [user]);
 
+  useEffect(() => {
+    if (!user) {
+      return;
+    }
+
+    const loadDevices = async () => {
+      try {
+        setSessionsLoading(true);
+        await refreshDevices();
+      } catch (loadError) {
+        setError(loadError.message || 'Failed to load linked devices.');
+      } finally {
+        setSessionsLoading(false);
+      }
+    };
+
+    loadDevices();
+  }, [user]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadPushStatus = async () => {
+      try {
+        const status = await getPushStatus();
+        if (cancelled) {
+          return;
+        }
+
+        setPushStatus(status);
+        setNotifications((currentValue) => ({
+          ...currentValue,
+          push: Boolean(status.enabled)
+        }));
+      } catch (loadError) {
+        if (!cancelled) {
+          console.error('Failed to load push notification status:', loadError);
+        }
+      }
+    };
+
+    loadPushStatus();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
   const getFontFamily = () => {
     switch(fontType) {
       case 'roboto':
@@ -125,6 +189,48 @@ export default function Settings() {
     }
     return "U";
   };
+
+  const formatLastActive = (value) => {
+    if (!value) {
+      return 'Recently';
+    }
+
+    const timestamp = new Date(value).getTime();
+    if (Number.isNaN(timestamp)) {
+      return 'Recently';
+    }
+
+    const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+
+    if (seconds < 60) {
+      return 'Just now';
+    }
+
+    if (seconds < 3600) {
+      const minutes = Math.floor(seconds / 60);
+      return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+    }
+
+    if (seconds < 86400) {
+      const hours = Math.floor(seconds / 3600);
+      return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    }
+
+    const days = Math.floor(seconds / 86400);
+    return `${days} day${days === 1 ? '' : 's'} ago`;
+  };
+
+  const activeSessions = devices.map((device) => ({
+    id: device.deviceId,
+    device: device.deviceName || `${device.browser || 'Browser'} on ${device.platform || 'Unknown Device'}`,
+    location: device.lastIp || 'Current network',
+    lastActive: formatLastActive(device.lastActive),
+    rawLastActive: device.lastActive,
+    current: device.deviceId === currentDeviceId || device.isCurrent,
+    fingerprint: device.publicKeyFingerprint,
+    identityStatus: device.identityStatus,
+    revoked: Boolean(device.revokedAt)
+  }));
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
@@ -209,17 +315,58 @@ export default function Settings() {
   const handleSignOut = async () => {
     try {
       await logout();
-      navigateTo('/');
+      navigate('/');
     } catch (err) {
       console.error('Logout failed', err);
     }
   };
 
-  const toggleNotification = (key) => {
-    setNotifications(prev => ({
-      ...prev,
-      [key]: !prev[key]
-    }));
+  const toggleNotification = async (key) => {
+    if (key !== 'push') {
+      setNotifications((prev) => ({
+        ...prev,
+        [key]: !prev[key]
+      }));
+      return;
+    }
+
+    setPushToggleLoading(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      const nextStatus = notifications.push
+        ? await disablePushNotifications()
+        : await syncPushSubscription({ requestPermission: true });
+
+      const resolvedStatus = nextStatus?.supported === false
+        ? nextStatus
+        : {
+            ...(await getPushStatus()),
+            ...nextStatus
+          };
+
+      setPushStatus(resolvedStatus);
+      setNotifications((prev) => ({
+        ...prev,
+        push: Boolean(resolvedStatus.enabled)
+      }));
+
+      if (!resolvedStatus.supported) {
+        setError('This browser does not support push notifications.');
+      } else if (!resolvedStatus.serverConfigured) {
+        setError('Push notifications are not configured on the server yet.');
+      } else if (!resolvedStatus.enabled && resolvedStatus.permission === 'denied') {
+        setError('Browser notifications are blocked for this site.');
+      } else {
+        setSuccess(resolvedStatus.enabled ? 'Push notifications enabled.' : 'Push notifications disabled.');
+        setTimeout(() => setSuccess(''), 3000);
+      }
+    } catch (toggleError) {
+      setError(toggleError.message || 'Failed to update push notifications.');
+    } finally {
+      setPushToggleLoading(false);
+    }
   };
 
   const handleToggle2FA = () => {
@@ -257,10 +404,91 @@ export default function Settings() {
     }
   };
 
-  const handleRevokeSession = (sessionId) => {
-    setActiveSessions(activeSessions.filter(s => s.id !== sessionId));
-    setSuccess('Session revoked successfully!');
-    setTimeout(() => setSuccess(''), 3000);
+  const handleRenameSession = async (sessionId, currentName) => {
+    const nextName = window.prompt('Enter a label for this linked device.', currentName);
+
+    if (nextName === null) {
+      return;
+    }
+
+    const trimmedName = nextName.trim();
+    if (!trimmedName) {
+      setError('Device name cannot be empty.');
+      return;
+    }
+
+    try {
+      await renameDevice(sessionId, trimmedName);
+      setSuccess('Device name updated.');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (renameError) {
+      setError(renameError.message || 'Failed to rename device.');
+    }
+  };
+
+  const handleRevokeSession = async (sessionId) => {
+    try {
+      await revokeDevice(sessionId);
+      setSuccess('Linked device revoked successfully.');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (revokeError) {
+      setError(revokeError.message || 'Failed to revoke linked device.');
+    }
+  };
+
+  const handleCopyFingerprint = async () => {
+    if (!encryptionState?.fingerprint) {
+      setError('No active device fingerprint is available yet.');
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(encryptionState.fingerprint);
+      setSuccess('Device fingerprint copied.');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (copyError) {
+      setError('Failed to copy the device fingerprint.');
+    }
+  };
+
+  const handleExportEncryptionBackup = async () => {
+    const passphrase = window.prompt('Enter a backup passphrase with at least 8 characters.');
+
+    if (passphrase === null) {
+      return;
+    }
+
+    try {
+      await downloadEncryptionBackup(passphrase);
+      setSuccess('Encrypted key backup downloaded. Keep the file and passphrase safe.');
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (backupError) {
+      setError(backupError.message || 'Failed to export the encryption backup.');
+    }
+  };
+
+  const handleImportEncryptionBackup = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+
+    if (!file) {
+      return;
+    }
+
+    const passphrase = window.prompt('Enter the passphrase for this encryption backup.');
+
+    if (passphrase === null) {
+      return;
+    }
+
+    try {
+      const backupContent = await file.text();
+      await restoreEncryptionBackup(backupContent, passphrase);
+      setSuccess('Encryption backup restored on this device.');
+      setTimeout(() => setSuccess(''), 4000);
+    } catch (restoreError) {
+      setError(restoreError.message || 'Failed to restore the encryption backup.');
+    }
   };
 
   const renderProfileSection = () => (
@@ -483,6 +711,94 @@ export default function Settings() {
           Privacy & Security
         </h3>
         <div className="space-y-4">
+          <input
+            ref={backupFileInputRef}
+            type="file"
+            accept="application/json"
+            onChange={handleImportEncryptionBackup}
+            className="hidden"
+          />
+
+          <div className={`rounded-2xl border p-6 backdrop-blur-xl transition-all ${
+            encryptionState?.status === 'ready'
+              ? 'border-emerald-500/20 bg-emerald-500/5'
+              : encryptionState?.status === 'needs_recovery' || encryptionState?.status === 'key_mismatch'
+                ? 'border-amber-500/20 bg-amber-500/5'
+                : 'border-sky-500/20 bg-sky-500/5'
+          }`}>
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-5">
+                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center ${
+                  encryptionState?.status === 'ready'
+                    ? 'bg-emerald-500/10'
+                    : encryptionState?.status === 'needs_recovery' || encryptionState?.status === 'key_mismatch'
+                      ? 'bg-amber-500/10'
+                      : 'bg-sky-500/10'
+                }`}>
+                  <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11c0-.53.211-1.039.586-1.414A1.996 1.996 0 0114 9c.53 0 1.039.211 1.414.586.375.375.586.884.586 1.414 0 1.433-.667 2.2-2 3m-2 4h.01M5 12a7 7 0 1114 0v5a2 2 0 01-2 2H7a2 2 0 01-2-2v-5z" />
+                  </svg>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-lg font-bold text-white mb-1">End-to-End Encryption</div>
+                  <div className="text-sm text-slate-300 font-medium">
+                    {encryptionState?.message || 'Checking encryption status...'}
+                  </div>
+                  {encryptionState?.fingerprint && (
+                    <div className="mt-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/40">This Device Fingerprint</div>
+                      <div className="mt-1 break-all font-mono text-xs text-emerald-200">{encryptionState.fingerprint}</div>
+                    </div>
+                  )}
+                  {encryptionState?.serverFingerprint && encryptionState.serverFingerprint !== encryptionState.fingerprint && (
+                    <div className="mt-3 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-amber-300/70">Published Account Fingerprint</div>
+                      <div className="mt-1 break-all font-mono text-xs text-amber-200">{encryptionState.serverFingerprint}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => refreshEncryptionState()}
+                className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-xs font-semibold text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+              >
+                Refresh
+              </button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleCopyFingerprint}
+                disabled={!encryptionState?.fingerprint}
+                className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-white/80 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Copy Fingerprint
+              </button>
+              <button
+                type="button"
+                onClick={handleExportEncryptionBackup}
+                disabled={encryptionState?.status !== 'ready'}
+                className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Export Key Backup
+              </button>
+              <button
+                type="button"
+                onClick={() => backupFileInputRef.current?.click()}
+                className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-100 transition-colors hover:bg-amber-500/20"
+              >
+                Import Key Backup
+              </button>
+            </div>
+
+            <p className="mt-3 text-xs leading-relaxed text-slate-400">
+              Your private key stays on this device. Export a backup before switching browsers or machines, otherwise old encrypted chats cannot be recovered.
+            </p>
+          </div>
+
           {/* Two-Factor Authentication Toggle */}
           <div className="flex items-center justify-between p-6 rounded-2xl bg-emerald-500/5 backdrop-blur-xl border border-emerald-500/10 hover:border-emerald-500/30 transition-all group hover:bg-emerald-500/10">
             <div className="flex items-center gap-5">
@@ -531,7 +847,7 @@ export default function Settings() {
             </button>
           </div>
 
-          {/* Active Sessions - Expandable */}
+          {/* Linked Devices */}
           <div className="rounded-2xl bg-violet-500/5 backdrop-blur-xl border border-violet-500/10 hover:border-violet-500/30 transition-all overflow-hidden group hover:bg-violet-500/10">
             <button 
               onClick={() => setShowSessionsExpanded(!showSessionsExpanded)}
@@ -544,8 +860,10 @@ export default function Settings() {
                   </svg>
                 </div>
                 <div className="text-left">
-                  <div className="text-lg font-bold text-white mb-1">Active Sessions</div>
-                  <div className="text-sm text-slate-400 font-medium">{activeSessions.length} active devices connected</div>
+                  <div className="text-lg font-bold text-white mb-1">Linked Devices</div>
+                  <div className="text-sm text-slate-400 font-medium">
+                    {sessionsLoading ? 'Loading device activity...' : `${activeSessions.length} linked device${activeSessions.length === 1 ? '' : 's'} available`}
+                  </div>
                 </div>
               </div>
               <div className="flex items-center gap-4">
@@ -563,9 +881,21 @@ export default function Settings() {
             {/* Expanded Sessions List */}
             <div className={`transition-all duration-500 ease-in-out ${showSessionsExpanded ? 'max-h-[500px] opacity-100' : 'max-h-0 opacity-0'} overflow-hidden`}>
               <div className="px-6 pb-6 space-y-3 border-t border-white/5 pt-4">
-                {activeSessions.map((session) => (
+                {sessionsLoading && (
+                  <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-5 text-sm font-medium text-slate-400">
+                    Loading linked devices...
+                  </div>
+                )}
+
+                {!sessionsLoading && activeSessions.length === 0 && (
+                  <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-5 text-sm font-medium text-slate-400">
+                    No linked devices are registered for this account yet.
+                  </div>
+                )}
+
+                {!sessionsLoading && activeSessions.map((session) => (
                   <div key={session.id} className="p-4 rounded-xl bg-black/20 backdrop-blur-sm border border-white/5 hover:border-violet-500/30 transition-all">
-                    <div className="flex items-start justify-between">
+                    <div className="flex items-start justify-between gap-4">
                       <div className="flex items-start gap-4">
                         <div className="w-10 h-10 rounded-lg bg-violet-500/10 backdrop-blur-sm flex items-center justify-center flex-shrink-0">
                           <svg className="w-5 h-5 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -573,11 +903,16 @@ export default function Settings() {
                           </svg>
                         </div>
                         <div>
-                          <div className="text-sm font-bold text-white flex items-center gap-2">
+                          <div className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
                             {session.device}
                             {session.current && (
                               <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-500/20 text-emerald-400 rounded-full border border-emerald-500/30 shadow-[0_0_10px_rgba(16,185,129,0.2)]">
                                 Current
+                              </span>
+                            )}
+                            {session.revoked && (
+                              <span className="px-2 py-0.5 text-[10px] font-bold bg-rose-500/20 text-rose-300 rounded-full border border-rose-500/30">
+                                Revoked
                               </span>
                             )}
                           </div>
@@ -594,16 +929,29 @@ export default function Settings() {
                             </svg>
                             Last active: {session.lastActive}
                           </div>
+                          {session.fingerprint && (
+                            <div className="mt-2 break-all rounded-lg border border-white/5 bg-white/5 px-2.5 py-2 font-mono text-[11px] text-violet-100/80">
+                              {session.fingerprint}
+                            </div>
+                          )}
                         </div>
                       </div>
-                      {!session.current && (
+                      <div className="flex flex-col items-end gap-2">
                         <button
-                          onClick={() => handleRevokeSession(session.id)}
-                          className="px-4 py-2 text-xs font-bold bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg transition-all border border-red-500/20 hover:border-red-500/40"
+                          onClick={() => handleRenameSession(session.id, session.device)}
+                          className="px-4 py-2 text-xs font-bold bg-white/5 hover:bg-white/10 text-slate-200 rounded-lg transition-all border border-white/10"
                         >
-                          Revoke
+                          Rename
                         </button>
-                      )}
+                        {!session.current && !session.revoked && (
+                          <button
+                            onClick={() => handleRevokeSession(session.id)}
+                            className="px-4 py-2 text-xs font-bold bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg transition-all border border-red-500/20 hover:border-red-500/40"
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -964,6 +1312,22 @@ export default function Settings() {
 
   const renderNotificationsSection = () => {
     const enabledCount = Object.values(notifications).filter(Boolean).length;
+    const pushDescription = !pushStatus.supported
+      ? 'This browser does not support push notifications.'
+      : !pushStatus.serverConfigured
+        ? 'Push notifications are not configured on the server yet.'
+        : pushStatus.permission === 'denied'
+          ? 'Browser notifications are blocked for this site.'
+          : notifications.push
+            ? 'You will receive instant push alerts for important activity.'
+            : 'Push alerts are currently disabled.';
+    const pushBadgeLabel = !pushStatus.supported
+      ? 'Unsupported'
+      : pushToggleLoading
+        ? 'Syncing'
+        : notifications.push
+          ? 'On'
+          : 'Off';
 
     return (
       <div className="space-y-6">
@@ -1001,11 +1365,12 @@ export default function Settings() {
             <button
               type="button"
               onClick={() => toggleNotification('push')}
+              disabled={pushToggleLoading || !pushStatus.supported || !pushStatus.serverConfigured}
               className={`w-full flex items-center justify-between p-5 rounded-2xl border transition-all duration-300 transform hover:scale-[1.01] group ${
                 notifications.push
                   ? 'bg-indigo-500/10 backdrop-blur-xl border-indigo-500/30 shadow-lg shadow-indigo-500/10'
                   : 'bg-white/5 backdrop-blur-xl border-white/10 hover:border-indigo-400/30 hover:bg-white/10'
-              }`}
+              } ${pushToggleLoading || !pushStatus.supported || !pushStatus.serverConfigured ? 'cursor-not-allowed opacity-70' : ''}`}
             >
               <div className="flex items-start gap-4">
                 <div className="mt-1 w-10 h-10 rounded-xl bg-indigo-500/20 backdrop-blur-sm flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
@@ -1028,9 +1393,7 @@ export default function Settings() {
                     </span>
                   </div>
                   <div className="text-xs text-slate-400 font-medium">
-                    {notifications.push
-                      ? 'You will receive instant push alerts for important activity.'
-                      : 'Push alerts are currently disabled.'}
+                    {pushDescription}
                   </div>
                 </div>
               </div>
@@ -1040,7 +1403,7 @@ export default function Settings() {
                     notifications.push ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-700/50 text-slate-400 border border-white/10'
                   }`}
                 >
-                  {notifications.push ? 'On' : 'Off'}
+                  {pushBadgeLabel}
                 </div>
                 <div
                   className={`w-12 h-6 rounded-full relative transition-all duration-300 ${

@@ -2,16 +2,28 @@ import { useState, useEffect, useRef } from 'react';
 import { 
   Search, Plus, Send, Paperclip, Smile, MoreVertical, 
   Phone, Video, Info, ArrowLeft, Check, CheckCheck,
-  Image as ImageIcon, File, Mic, X, MessageCircle, Zap
+  Image as ImageIcon, File, Mic, X, MessageCircle, Zap,
+  Reply, Pencil, Trash2
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import socketService from '../services/socket';
 import api from '../services/api';
+import cryptoService from '../services/cryptoService';
 import UserProfile from './UserProfile';
+import RoomsPage from './RoomsPage';
+import ChannelsPage from './ChannelsPage';
+import { idsEqual, normalizeId } from '../utils/identity';
+import {
+  computeExpiresAt,
+  getDisappearingTimerOption,
+  getNextDisappearingTimer,
+  markAttachmentConsumedLocally
+} from '../utils/messagePrivacy';
 
 const ChatsPage = () => {
-  const { user } = useAuth();
+  const { user, encryptionState } = useAuth();
   const [chats, setChats] = useState([]);
+  const [activeMode, setActiveMode] = useState('direct');
   const [selectedChat, setSelectedChat] = useState(null);
   const [messages, setMessages] = useState([]);
   const [messageInput, setMessageInput] = useState('');
@@ -25,6 +37,10 @@ const ChatsPage = () => {
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const [callStatus, setCallStatus] = useState(null);
+  const [disappearingTimer, setDisappearingTimer] = useState(null);
+  const [viewOnceNextFile, setViewOnceNextFile] = useState(false);
+  const [replyTarget, setReplyTarget] = useState(null);
+  const [editingMessage, setEditingMessage] = useState(null);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const selectedChatRef = useRef(null);
@@ -42,6 +58,22 @@ const ChatsPage = () => {
     
     return () => {
       cleanupSocketListeners();
+    };
+  }, []);
+
+  useEffect(() => {
+    const openGroups = () => setActiveMode('rooms');
+    const openDirectMessages = () => setActiveMode('direct');
+    const openChannels = () => setActiveMode('channels');
+
+    window.addEventListener('vaaniarc:open-groups', openGroups);
+    window.addEventListener('vaaniarc:open-direct-messages', openDirectMessages);
+    window.addEventListener('vaaniarc:open-channels', openChannels);
+
+    return () => {
+      window.removeEventListener('vaaniarc:open-groups', openGroups);
+      window.removeEventListener('vaaniarc:open-direct-messages', openDirectMessages);
+      window.removeEventListener('vaaniarc:open-channels', openChannels);
     };
   }, []);
 
@@ -86,7 +118,8 @@ const ChatsPage = () => {
   const fetchChats = async () => {
     try {
       const response = await api.get('/chats');
-      setChats(Array.isArray(response) ? response : (response?.data || []));
+      const nextChats = await cryptoService.hydratePrivateChats(Array.isArray(response) ? response : []);
+      setChats(nextChats);
     } catch (error) {
       console.error('Error fetching chats:', error);
       setChats([]);
@@ -96,7 +129,8 @@ const ChatsPage = () => {
   const fetchMessages = async (chatId) => {
     try {
       const response = await api.get(`/chats/${chatId}/messages`);
-      setMessages(Array.isArray(response) ? response : (response?.data || []));
+      const nextMessages = await cryptoService.hydratePrivateMessages(Array.isArray(response) ? response : []);
+      setMessages(nextMessages);
     } catch (error) {
       console.error('Error fetching messages:', error);
       setMessages([]);
@@ -120,6 +154,9 @@ const ChatsPage = () => {
     socketService.on('messages_read', handleMessagesRead);
     socketService.on('call_request_sent', handleCallRequestSent);
     socketService.on('incoming_call', handleIncomingCall);
+    socketService.on('private_message_reaction', handlePrivateMessageReaction);
+    socketService.on('private_message_edit', handlePrivateMessageEdit);
+    socketService.on('private_message_delete', handlePrivateMessageDelete);
   };
 
   const cleanupSocketListeners = () => {
@@ -130,15 +167,45 @@ const ChatsPage = () => {
     socketService.off('messages_read', handleMessagesRead);
     socketService.off('call_request_sent', handleCallRequestSent);
     socketService.off('incoming_call', handleIncomingCall);
+    socketService.off('private_message_reaction', handlePrivateMessageReaction);
+    socketService.off('private_message_edit', handlePrivateMessageEdit);
+    socketService.off('private_message_delete', handlePrivateMessageDelete);
   };
 
-  const handleNewMessage = (message) => {
+  const updateMessageEverywhere = (nextMessage) => {
+    if (!nextMessage?._id) {
+      return;
+    }
+
+    setMessages((currentMessages) => currentMessages.map((entry) => (
+      idsEqual(entry._id, nextMessage._id) ? { ...entry, ...nextMessage, isOptimistic: false } : entry
+    )));
+
+    setChats((currentChats) => currentChats.map((chat) => {
+      if (!idsEqual(chat._id, nextMessage.chatId || selectedChatRef.current?._id)) {
+        return chat;
+      }
+
+      if (!chat.lastMessage || !idsEqual(chat.lastMessage._id, nextMessage._id)) {
+        return chat;
+      }
+
+      return {
+        ...chat,
+        lastMessage: nextMessage,
+        updatedAt: nextMessage.updatedAt || nextMessage.createdAt || chat.updatedAt
+      };
+    }));
+  };
+
+  const handleNewMessage = async (incomingMessage) => {
+    const message = await cryptoService.hydratePrivateMessage(incomingMessage);
     // This handler now only receives messages from OTHER users
-    const messageChatId = message.chatId?._id || message.chatId?.toString() || message.chatId;
+    const messageChatId = normalizeId(message.chatId);
     const currentSelectedChat = selectedChatRef.current;
-    const selectedChatId = currentSelectedChat?._id?.toString() || currentSelectedChat?._id;
+    const selectedChatId = normalizeId(currentSelectedChat?._id);
     
-    if (currentSelectedChat && messageChatId === selectedChatId) {
+    if (currentSelectedChat && idsEqual(messageChatId, selectedChatId)) {
       setMessages(prev => {
         // Check if message already exists to prevent duplicates
         const exists = prev.some(m => m._id === message._id);
@@ -155,7 +222,7 @@ const ChatsPage = () => {
     setChats(prev => {
       const updated = prev.map(chat => {
         const chatId = chat._id?.toString() || chat._id;
-        if (chatId === messageChatId) {
+        if (idsEqual(chatId, messageChatId)) {
           return { ...chat, lastMessage: message, updatedAt: new Date() };
         }
         return chat;
@@ -165,12 +232,13 @@ const ChatsPage = () => {
   };
 
   // Handle confirmation of our own sent message
-  const handleMessageSent = (message) => {
-    const messageChatId = message.chatId?._id || message.chatId?.toString() || message.chatId;
+  const handleMessageSent = async (incomingMessage) => {
+    const message = await cryptoService.hydratePrivateMessage(incomingMessage);
+    const messageChatId = normalizeId(message.chatId);
     const currentSelectedChat = selectedChatRef.current;
-    const selectedChatId = currentSelectedChat?._id?.toString() || currentSelectedChat?._id;
+    const selectedChatId = normalizeId(currentSelectedChat?._id);
     
-    if (currentSelectedChat && messageChatId === selectedChatId) {
+    if (currentSelectedChat && idsEqual(messageChatId, selectedChatId)) {
       setMessages(prev => {
         // Prefer matching by tempId when present to avoid content collisions
         const optimisticIndexByTemp = prev.findIndex(m => m.isOptimistic && m.tempId && m.tempId === message.tempId);
@@ -201,7 +269,7 @@ const ChatsPage = () => {
     setChats(prev => {
       const updated = prev.map(chat => {
         const chatId = chat._id?.toString() || chat._id;
-        if (chatId === messageChatId) {
+        if (idsEqual(chatId, messageChatId)) {
           return { ...chat, lastMessage: message, updatedAt: new Date() };
         }
         return chat;
@@ -212,20 +280,20 @@ const ChatsPage = () => {
 
   const handleUserTyping = ({ chatId, userId, username }) => {
     const currentSelectedChat = selectedChatRef.current;
-    if (currentSelectedChat && chatId === currentSelectedChat._id) {
+    if (currentSelectedChat && idsEqual(chatId, currentSelectedChat._id)) {
       setTypingUsers(prev => new Set([...prev, username]));
     }
   };
 
   const handleUserStopTyping = ({ chatId, userId }) => {
     const currentSelectedChat = selectedChatRef.current;
-    if (currentSelectedChat && chatId === currentSelectedChat._id) {
+    if (currentSelectedChat && idsEqual(chatId, currentSelectedChat._id)) {
       setTypingUsers(prev => {
         const updated = new Set(prev);
         // Remove by matching user
         setChats(currentChats => {
-          const chat = currentChats.find(c => c._id === chatId);
-          const typingUser = chat?.participants.find(p => p._id === userId);
+          const chat = currentChats.find(c => idsEqual(c._id, chatId));
+          const typingUser = chat?.participants.find(p => idsEqual(p._id, userId));
           if (typingUser) {
             updated.delete(typingUser.username);
           }
@@ -237,35 +305,37 @@ const ChatsPage = () => {
   };
 
   const handleMessagesRead = ({ chatId, readBy }) => {
-    const normalizeId = (val) => {
-      if (!val) return '';
-      if (typeof val === 'object') {
-        if (val._id) return val._id.toString();
-        if (val.id) return val.id.toString();
-      }
-      return val.toString();
-    };
-
     const currentSelectedChat = selectedChatRef.current;
-    if (currentSelectedChat && chatId === currentSelectedChat._id) {
+    if (currentSelectedChat && idsEqual(chatId, currentSelectedChat._id)) {
       setMessages(prev => prev.map(msg => {
-        const senderId = normalizeId(msg.sender?._id || msg.sender?.id || msg.sender);
-        const currentUserId = normalizeId(user?._id || user?.id);
-        return senderId === currentUserId ? { ...msg, read: true, readAt: new Date() } : msg;
+        return idsEqual(msg.sender, user?._id || user?.id) ? { ...msg, read: true, readAt: new Date() } : msg;
       }));
     }
 
     // Also update chat list lastMessage read state
     setChats(prev => prev.map(chat => {
-      if ((chat._id?.toString() || chat._id) !== chatId) return chat;
+      if (!idsEqual(chat._id, chatId)) return chat;
       if (!chat.lastMessage) return chat;
-      const lastSenderId = normalizeId(chat.lastMessage.sender?._id || chat.lastMessage.sender?.id || chat.lastMessage.sender);
-      const currentUserId = normalizeId(user?._id || user?.id);
-      if (lastSenderId === currentUserId) {
+      if (idsEqual(chat.lastMessage.sender, user?._id || user?.id)) {
         return { ...chat, lastMessage: { ...chat.lastMessage, read: true, readAt: new Date() } };
       }
       return chat;
     }));
+  };
+
+  const handlePrivateMessageReaction = async ({ message }) => {
+    const hydratedMessage = await cryptoService.hydratePrivateMessage(message);
+    updateMessageEverywhere(hydratedMessage);
+  };
+
+  const handlePrivateMessageEdit = async ({ message }) => {
+    const hydratedMessage = await cryptoService.hydratePrivateMessage(message);
+    updateMessageEverywhere(hydratedMessage);
+  };
+
+  const handlePrivateMessageDelete = async ({ message }) => {
+    const hydratedMessage = await cryptoService.hydratePrivateMessage(message);
+    updateMessageEverywhere(hydratedMessage);
   };
 
   const handleSendMessage = async (e) => {
@@ -275,6 +345,28 @@ const ChatsPage = () => {
 
     try {
       const content = messageInput.trim();
+
+      if (editingMessage?._id) {
+        const response = await api.editMessage(editingMessage._id, content);
+        const updatedMessage = await cryptoService.hydratePrivateMessage(response?.message || response?.data?.message);
+        if (updatedMessage) {
+          updateMessageEverywhere(updatedMessage);
+        }
+        setEditingMessage(null);
+        setMessageInput('');
+        return;
+      }
+
+      const recipient = getOtherParticipant(selectedChat) || selectedUser;
+
+      if (!recipient?._id) {
+        throw new Error('Recipient encryption key is unavailable');
+      }
+
+      const encryptedContent = await cryptoService.encryptTextForUsers(content, [
+        recipient._id,
+        user?._id || user?.id
+      ]);
       const tempId = `temp-${Date.now()}`;
       setMessageInput('');
       
@@ -289,7 +381,7 @@ const ChatsPage = () => {
         _id: tempId, // Temporary ID to map server confirmation
         chatId: selectedChat._id,
         sender: {
-          _id: user._id,
+          _id: user?._id || user?.id,
           username: user.username,
           avatar: user.avatar
         },
@@ -297,21 +389,112 @@ const ChatsPage = () => {
         messageType: 'text',
         createdAt: new Date().toISOString(),
         read: false,
+        expiresInSeconds: disappearingTimer,
+        expiresAt: computeExpiresAt(disappearingTimer),
+        replyTo: replyTarget ? { ...replyTarget, replyTo: null } : null,
         tempId,
         isOptimistic: true // Flag to identify optimistic messages
       };
 
       setMessages(prev => [...prev, optimisticMessage]);
+      setReplyTarget(null);
 
       // Send via socket for real-time delivery
-      socketService.emit('private_message', {
-        chatId: selectedChat._id,
-        content,
-        messageType: 'text',
-        tempId
-      });
+      socketService.sendPrivateMessage(
+        selectedChat._id,
+        cryptoService.encryptedPlaceholder,
+        'text',
+        null,
+        encryptedContent,
+        disappearingTimer,
+        tempId,
+        replyTarget?._id || null
+      );
     } catch (error) {
       console.error('Error sending message:', error);
+      window.alert(error.message || 'Failed to send encrypted message.');
+    }
+  };
+
+  const cancelComposerAction = () => {
+    setReplyTarget(null);
+    setEditingMessage(null);
+    setMessageInput('');
+  };
+
+  const startReplyingToMessage = (message) => {
+    setReplyTarget(message);
+    setEditingMessage(null);
+  };
+
+  const startEditingMessage = (message) => {
+    if (message?.encryptedContent || Number(message?.protocolVersion || 1) >= 2) {
+      window.alert('Secure messages cannot be edited in place.');
+      return;
+    }
+
+    setEditingMessage(message);
+    setReplyTarget(null);
+    setMessageInput(message.content || '');
+  };
+
+  const handleToggleReaction = async (message, emoji) => {
+    try {
+      const currentUserId = normalizeId(user?._id || user?.id);
+      const alreadyReacted = Array.isArray(message.reactions) && message.reactions.some((reaction) => (
+        idsEqual(reaction.user?._id || reaction.user, currentUserId) && reaction.emoji === emoji
+      ));
+
+      const response = alreadyReacted
+        ? await api.removeReaction(message._id, emoji)
+        : await api.addReaction(message._id, emoji);
+
+      const updatedMessage = await cryptoService.hydratePrivateMessage(response?.message || response?.data?.message);
+      if (updatedMessage) {
+        updateMessageEverywhere(updatedMessage);
+      }
+    } catch (error) {
+      console.error('Error updating reaction:', error);
+      window.alert(error.message || 'Failed to update the reaction.');
+    }
+  };
+
+  const handleDeleteMessage = async (message) => {
+    if (!window.confirm('Delete this message?')) {
+      return;
+    }
+
+    try {
+      const response = await api.deleteMessage(message._id);
+      const updatedMessage = await cryptoService.hydratePrivateMessage(response?.message || response?.data?.message);
+      if (updatedMessage) {
+        updateMessageEverywhere(updatedMessage);
+      }
+    } catch (error) {
+      console.error('Error deleting message:', error);
+      window.alert(error.message || 'Failed to delete the message.');
+    }
+  };
+
+  const handleDownloadAttachment = async (message) => {
+    try {
+      if (message?.fileMetadata?.encryptionPayload) {
+        const result = await cryptoService.downloadEncryptedAttachment(message);
+
+        if (result?.consumed) {
+          setMessages((currentMessages) => currentMessages.map((entry) => (
+            entry._id === message._id ? markAttachmentConsumedLocally(entry) : entry
+          )));
+        }
+
+        return;
+      }
+
+      if (message?.fileUrl) {
+        window.open(message.fileUrl, '_blank', 'noopener,noreferrer');
+      }
+    } catch (error) {
+      console.error('Error downloading attachment:', error);
     }
   };
 
@@ -327,14 +510,14 @@ const ChatsPage = () => {
   };
 
   const handleCallRequestSent = ({ chatId, callType }) => {
-    if (!selectedChat || chatId !== selectedChat._id) return;
+    if (!selectedChat || !idsEqual(chatId, selectedChat._id)) return;
     setCallStatus(`${callType === 'video' ? 'Video' : 'Audio'} call request sent`);
     setTimeout(() => setCallStatus(null), 3000);
   };
 
   const handleIncomingCall = ({ chatId, callType, from }) => {
     const currentChatId = selectedChatRef.current?._id;
-    if (chatId && currentChatId && chatId !== currentChatId) return;
+    if (chatId && currentChatId && !idsEqual(chatId, currentChatId)) return;
     const callerName = from?.username || 'Contact';
     setCallStatus(`Incoming ${callType === 'video' ? 'video' : 'audio'} call from ${callerName}`);
     // Lightweight alert for now; real UI can be added later
@@ -345,19 +528,25 @@ const ChatsPage = () => {
   const uploadAndSendFile = async (file) => {
     if (!file || !selectedChat) return;
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('chatId', selectedChat._id);
+      const recipient = getOtherParticipant(selectedChat) || selectedUser;
+      if (!recipient?._id) {
+        throw new Error('Recipient encryption key is unavailable');
+      }
 
-      // Optional tempId to align with message_sent event
       const tempId = `temp-file-${Date.now()}`;
-      formData.append('tempId', tempId);
+      const encryptedAttachment = await cryptoService.encryptAttachmentForUsers(file, [
+        recipient._id,
+        user?._id || user?.id
+      ]);
 
-      const response = await api.post('/upload/chat-file', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
+      const response = await api.uploadChatFile(selectedChat._id, encryptedAttachment.encryptedFile, {
+        tempId,
+        encryptedFilePayload: encryptedAttachment.encryptionPayload,
+        expiresInSeconds: disappearingTimer,
+        isViewOnce: viewOnceNextFile
       });
 
-      const savedMessage = response?.data?.data || response?.data || response;
+      const savedMessage = await cryptoService.hydratePrivateMessage(response?.data || response);
       if (!savedMessage) return;
 
       // Optimistically insert if not present
@@ -371,15 +560,20 @@ const ChatsPage = () => {
       setChats(prev => {
         const updated = prev.map(chat => {
           const chatId = chat._id?.toString() || chat._id;
-          if (chatId === selectedChat._id) {
+          if (idsEqual(chatId, selectedChat._id)) {
             return { ...chat, lastMessage: savedMessage, updatedAt: new Date() };
           }
           return chat;
         });
         return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
       });
+
+      if (viewOnceNextFile) {
+        setViewOnceNextFile(false);
+      }
     } catch (error) {
       console.error('Error uploading file:', error);
+      window.alert(error.message || 'Failed to send encrypted attachment.');
     }
   };
 
@@ -394,7 +588,7 @@ const ChatsPage = () => {
   const handleTyping = (e) => {
     setMessageInput(e.target.value);
 
-    if (!selectedChat) return;
+    if (!selectedChat || editingMessage) return;
 
     // Send typing indicator
     if (!isTyping) {
@@ -437,21 +631,20 @@ const ChatsPage = () => {
       }
       
       const response = await api.post('/chats', { recipientId });
-      const chat = response?.data || response;
+      const chat = response;
       
       let otherUser = recipientUser; 
 
       if (!otherUser && chat?.participants && Array.isArray(chat.participants)) {
-        const currentUserId = user?._id?.toString() || user?._id;
+        const currentUserId = normalizeId(user?._id || user?.id);
         otherUser = chat.participants.find(p => {
-          const pId = typeof p === 'object' ? (p._id?.toString() || p._id) : p?.toString();
-          return pId !== currentUserId && typeof p === 'object' && p.username;
+          return !idsEqual(p, currentUserId) && typeof p === 'object' && p.username;
         });
       }
       if (!otherUser?.username) {
         try {
           const userResponse = await api.get(`/users/${recipientId}`);
-          const recipientUser = userResponse?.data || userResponse;
+          const recipientUser = userResponse;
           if (recipientUser) {
             otherUser = recipientUser;
           }
@@ -506,6 +699,9 @@ const ChatsPage = () => {
     if (otherUser) {
       setSelectedUser(otherUser);
     }
+    setReplyTarget(null);
+    setEditingMessage(null);
+    setMessageInput('');
     setSelectedChat(chat);
   };
 
@@ -523,8 +719,82 @@ const ChatsPage = () => {
     }
   };
 
+  const encryptionBlocked = encryptionState?.status !== 'ready';
+  const activeTimerOption = getDisappearingTimerOption(disappearingTimer);
+  const cycleDisappearingTimer = () => {
+    setDisappearingTimer((currentValue) => getNextDisappearingTimer(currentValue));
+  };
+  const getReactionSummary = (reactions = []) => {
+    const summary = new Map();
+
+    reactions.forEach((reaction) => {
+      const key = reaction.emoji;
+      if (!key) {
+        return;
+      }
+
+      const currentEntry = summary.get(key) || {
+        emoji: key,
+        count: 0,
+        reactedByCurrentUser: false
+      };
+
+      currentEntry.count += 1;
+      if (idsEqual(reaction.user?._id || reaction.user, user?._id || user?.id)) {
+        currentEntry.reactedByCurrentUser = true;
+      }
+
+      summary.set(key, currentEntry);
+    });
+
+    return Array.from(summary.values());
+  };
+
   return (
-    <div className="flex h-[calc(100vh-4rem)] bg-[#0b141a] overflow-hidden">
+    <div className="flex h-[calc(100vh-4rem)] flex-col bg-[#0b141a] overflow-hidden">
+      <div className="flex items-center justify-center gap-2 border-b border-white/5 bg-slate-950/70 px-4 py-3 backdrop-blur-xl">
+        <button
+          type="button"
+          onClick={() => setActiveMode('direct')}
+          className={`rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
+            activeMode === 'direct'
+              ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20'
+              : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white'
+          }`}
+        >
+          Direct Messages
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMode('rooms')}
+          className={`rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
+            activeMode === 'rooms'
+              ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20'
+              : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white'
+          }`}
+        >
+          Groups
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveMode('channels')}
+          className={`rounded-full px-4 py-2 text-sm font-semibold transition-colors ${
+            activeMode === 'channels'
+              ? 'bg-emerald-500 text-white shadow-lg shadow-emerald-500/20'
+              : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white'
+          }`}
+        >
+          Channels
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0">
+        {activeMode === 'rooms' ? (
+          <RoomsPage />
+        ) : activeMode === 'channels' ? (
+          <ChannelsPage />
+        ) : (
+    <div className="flex h-full bg-[#0b141a] overflow-hidden">
       {/* Chat List Sidebar - Apple Glass Style */}
       <div className={`w-full md:w-80 lg:w-96 flex flex-col flex-shrink-0 ${selectedChat ? 'hidden md:flex' : 'flex'}`} style={{background: 'linear-gradient(180deg, rgba(30,30,40,0.95) 0%, rgba(15,15,25,0.98) 100%)', backdropFilter: 'blur(40px) saturate(180%)', borderRight: '1px solid rgba(255,255,255,0.08)'}}>
         {/* Search Header */}
@@ -684,11 +954,11 @@ const ChatsPage = () => {
               return other.username.toLowerCase().includes(searchQuery.toLowerCase());
             }).map((chat) => {
               const otherUser = getOtherParticipant(chat);
-              const isSelected = selectedChat?._id === chat._id;
+              const isSelected = idsEqual(selectedChat?._id, chat._id);
               const lastMessageSenderId = typeof chat.lastMessage?.sender === 'object' 
                 ? chat.lastMessage?.sender?._id 
                 : chat.lastMessage?.sender;
-              const hasUnread = chat.lastMessage && lastMessageSenderId !== user._id && !chat.lastMessage.read;
+              const hasUnread = chat.lastMessage && !idsEqual(lastMessageSenderId, user?._id) && !chat.lastMessage.read;
 
               return (
                 <button
@@ -733,7 +1003,7 @@ const ChatsPage = () => {
                     </div>
                     {chat.lastMessage && (
                       <div className="flex items-center space-x-1.5">
-                        {lastMessageSenderId === user._id && (
+                        {idsEqual(lastMessageSenderId, user?._id) && (
                           chat.lastMessage.read ? (
                             <CheckCheck className="w-4 h-4 text-blue-400 flex-shrink-0" />
                           ) : (
@@ -847,25 +1117,26 @@ const ChatsPage = () => {
               <div className="bg-slate-900/50 backdrop-blur-sm border border-white/5 px-4 py-2 rounded-xl shadow-sm">
                 <p className="text-xs text-slate-400 flex items-center gap-1.5 font-medium">
                   <Zap className="w-3 h-3 text-yellow-500" />
-                  <span>Messages are end-to-end encrypted.</span>
+                  <span>Private messages and attachments are end-to-end encrypted on this device.</span>
                 </p>
               </div>
             </div>
+            {encryptionState?.status !== 'ready' && (
+              <div className="flex justify-center mb-4">
+                <div className="max-w-xl rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+                  {encryptionState?.message || 'Encryption is not ready on this device.'}
+                </div>
+              </div>
+            )}
             {(messages || []).map((message, index) => {
-              // Normalize ids so own messages stay on the right after refresh
-              const normalizeId = (val) => {
-                if (!val) return '';
-                if (typeof val === 'object') {
-                  if (val._id) return val._id.toString();
-                  if (val.id) return val.id.toString();
-                }
-                return val.toString();
-              };
-
-              const senderId = normalizeId(message?.sender?._id || message?.sender?.id || message?.sender);
+              const senderId = normalizeId(message?.sender);
               const currentUserId = normalizeId(user?._id || user?.id);
-              const isOwn = senderId === currentUserId;
-              const showAvatar = !isOwn && (index === messages.length - 1 || messages[index + 1]?.sender?._id !== message?.sender?._id);
+              const isOwn = idsEqual(senderId, currentUserId);
+              const reactionSummary = getReactionSummary(message.reactions);
+              const showAvatar = !isOwn && (
+                index === messages.length - 1 ||
+                !idsEqual(messages[index + 1]?.sender, message?.sender)
+              );
 
               return (
                 <div
@@ -890,8 +1161,133 @@ const ChatsPage = () => {
                         : 'bg-[#202c33] text-[#e9edef] rounded-bl-none'
                     }`}
                   >
-                    <p className="break-words">{message.content}</p>
+                    {message.replyTo && (
+                      <div className={`mb-2 rounded-md border-l-2 px-3 py-2 text-xs ${
+                        isOwn
+                          ? 'border-white/40 bg-white/10 text-white/80'
+                          : 'border-emerald-400/60 bg-black/15 text-white/70'
+                      }`}>
+                        <p className="font-semibold">
+                          Replying to {message.replyTo?.sender?.username || 'Message'}
+                        </p>
+                        <p className="mt-1 line-clamp-2 break-words">
+                          {message.replyTo?.content || 'Encrypted message'}
+                        </p>
+                      </div>
+                    )}
+
+                    {message.fileMetadata ? (
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadAttachment(message)}
+                        className={`w-full flex items-center gap-3 text-left rounded-md px-1 py-1 transition-colors ${
+                          isOwn ? 'hover:bg-white/10' : 'hover:bg-white/5'
+                        }`}
+                      >
+                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
+                          isOwn ? 'bg-white/15' : 'bg-black/20'
+                        }`}>
+                          <File className="w-5 h-5" />
+                        </div>
+                        <div className="min-w-0">
+                          <p className="break-words font-medium">
+                            {message.decryptedFileMetadata?.originalName || message.content}
+                          </p>
+                          <p className="text-xs opacity-75">
+                            {message.decryptedFileMetadata?.size
+                              ? `${Math.round(message.decryptedFileMetadata.size / 1024)} KB`
+                              : 'Tap to download'}
+                          </p>
+                        </div>
+                      </button>
+                    ) : (
+                      <p className="break-words">{message.content}</p>
+                    )}
+
+                    {reactionSummary.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {reactionSummary.map((reaction) => (
+                          <button
+                            key={`${message._id}-${reaction.emoji}`}
+                            type="button"
+                            onClick={() => handleToggleReaction(message, reaction.emoji)}
+                            className={`rounded-full px-2 py-0.5 text-xs font-semibold transition-colors ${
+                              reaction.reactedByCurrentUser
+                                ? 'bg-amber-400/20 text-amber-100'
+                                : 'bg-black/20 text-white/80'
+                            }`}
+                          >
+                            {reaction.emoji} {reaction.count}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {(message.isViewOnce || message.expiresAt || message.isExpired) && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {message.isViewOnce && (
+                          <span className="rounded-full bg-black/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">
+                            {message.isViewOnceConsumed ? 'Opened once' : 'View once'}
+                          </span>
+                        )}
+                        {message.expiresAt && !message.isExpired && (
+                          <span className="rounded-full bg-black/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">
+                            Disappears {getDisappearingTimerOption(message.expiresInSeconds).shortLabel}
+                          </span>
+                        )}
+                        {message.isExpired && (
+                          <span className="rounded-full bg-black/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white/70">
+                            Expired
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {!message.isDeleted && (
+                      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => startReplyingToMessage(message)}
+                          className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                        >
+                          <Reply className="h-3 w-3" />
+                          Reply
+                        </button>
+                        {['👍', '❤️', '😂'].map((emoji) => (
+                          <button
+                            key={`${message._id}-${emoji}-quick`}
+                            type="button"
+                            onClick={() => handleToggleReaction(message, emoji)}
+                            className="rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                        {isOwn && !message.fileMetadata && !message.encryptedContent && Number(message.protocolVersion || 1) < 2 && (
+                          <button
+                            type="button"
+                            onClick={() => startEditingMessage(message)}
+                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            Edit
+                          </button>
+                        )}
+                        {isOwn && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteMessage(message)}
+                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                            Delete
+                          </button>
+                        )}
+                      </div>
+                    )}
                     <div className={`flex items-center justify-end space-x-1 mt-1 ${isOwn ? 'text-[#8696a0]' : 'text-[#8696a0]'}`}>
+                      {message.isEdited && (
+                        <span className="text-[10px] uppercase tracking-wide text-white/60">edited</span>
+                      )}
                       <span className="text-xs">{formatTime(message.createdAt)}</span>
                       {isOwn && (
                         message.read ? (
@@ -910,6 +1306,52 @@ const ChatsPage = () => {
 
           {/* Message Input */}
           <div className="p-4 md:p-5 bg-[#0b141a]">          
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={cycleDisappearingTimer}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white/75 transition-colors hover:bg-white/10"
+                title="Cycle disappearing timer"
+              >
+                <Zap className="w-3.5 h-3.5 text-yellow-400" />
+                <span>Disappear {activeTimerOption.shortLabel}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewOnceNextFile((currentValue) => !currentValue)}
+                className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  viewOnceNextFile
+                    ? 'border-indigo-400/40 bg-indigo-500/20 text-indigo-100'
+                    : 'border-white/10 bg-white/5 text-white/75 hover:bg-white/10'
+                }`}
+                title="Make the next attachment view once"
+              >
+                <ImageIcon className="w-3.5 h-3.5" />
+                <span>{viewOnceNextFile ? 'Next file: view once' : 'Next file: reusable'}</span>
+              </button>
+            </div>
+
+            {(replyTarget || editingMessage) && (
+              <div className="mb-3 flex items-start justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/80">
+                <div>
+                  <p className="font-semibold text-white">
+                    {editingMessage ? 'Editing message' : `Replying to ${replyTarget?.sender?.username || 'message'}`}
+                  </p>
+                  <p className="mt-1 break-words text-xs text-white/60">
+                    {editingMessage?.content || replyTarget?.content || 'Encrypted message'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={cancelComposerAction}
+                  className="rounded-full p-1 text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+                  title="Cancel"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+
             <form onSubmit={handleSendMessage} className="flex items-center gap-2">
               <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileInput} accept="image/*,video/*,audio/*,application/pdf,text/plain" />
               <input type="file" ref={audioInputRef} className="hidden" onChange={handleFileInput} accept="audio/*" />
@@ -917,6 +1359,7 @@ const ChatsPage = () => {
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
+                disabled={encryptionBlocked}
                 className="p-3 bg-white/5 backdrop-blur-xl border border-white/10 hover:bg-white/10 rounded-2xl transition-all focus:outline-none"
                 title="Send file, image or video"
               >
@@ -925,6 +1368,7 @@ const ChatsPage = () => {
               <button
                 type="button"
                 onClick={() => audioInputRef.current?.click()}
+                disabled={encryptionBlocked}
                 className="p-3 bg-white/5 backdrop-blur-xl border border-white/10 hover:bg-white/10 rounded-2xl transition-all focus:outline-none"
                 title="Send audio"
               >
@@ -935,7 +1379,16 @@ const ChatsPage = () => {
                   type="text"
                   value={messageInput}
                   onChange={handleTyping}
-                  placeholder="Type a message"
+                  disabled={encryptionBlocked}
+                  placeholder={
+                    encryptionBlocked
+                      ? 'Import your key backup to send encrypted messages'
+                      : editingMessage
+                        ? 'Edit your message'
+                        : replyTarget
+                          ? 'Write your reply'
+                          : 'Type a message'
+                  }
                   className="w-full px-5 py-3.5 bg-slate-900/80/5 backdrop-blur-xl border border-white/10 rounded-3xl text-[#e9edef] placeholder-[#8696a0] focus:outline-none focus:border-white/20 focus:bg-slate-900/80/10 transition-all"
                 />
                 <button
@@ -946,14 +1399,14 @@ const ChatsPage = () => {
                   <Smile className="w-5 h-5" />
                 </button>
               </div>
-              <button
-                type="submit"
-                disabled={!messageInput.trim()}
-                className="p-3.5 bg-[#00a884] backdrop-blur-xl rounded-2xl hover:bg-[#06cf9c] transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg focus:outline-none"
-                title="Send"
-              >
-                <Send className="w-5 h-5" />
-              </button>
+                <button
+                  type="submit"
+                  disabled={!messageInput.trim() || encryptionBlocked}
+                  className="p-3.5 bg-[#00a884] backdrop-blur-xl rounded-2xl hover:bg-[#06cf9c] transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg focus:outline-none"
+                  title={editingMessage ? 'Save edit' : 'Send'}
+                >
+                  <Send className="w-5 h-5" />
+                </button>
             </form>
           </div>
         </div>
@@ -966,15 +1419,15 @@ const ChatsPage = () => {
             </div>
             <h3 className="text-2xl md:text-3xl font-light mb-3 text-[#e9edef]">VaaniArc Web</h3>
             <p className="text-sm md:text-base text-[#8696a0] leading-relaxed">
-              Send and receive messages without keeping your phone online.<br />
-              Use VaaniArc on up to 4 linked devices and 1 phone at the same time.
+              Start a private chat or room conversation from your browser.<br />
+              Built for a reliable college-project demo, not multi-device sync.
             </p>
             <div className="mt-6 md:mt-8 pt-4 md:pt-6 border-t border-[#2a2f32]">
               <p className="text-xs text-[#667781] flex items-center justify-center gap-1 flex-wrap">
                 <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
                   <path d="M6 0L7.5 4.5L12 6L7.5 7.5L6 12L4.5 7.5L0 6L4.5 4.5L6 0Z" />
                 </svg>
-                End-to-end encrypted
+                Private text messages are end-to-end encrypted
               </p>
             </div>
           </div>
@@ -992,6 +1445,9 @@ const ChatsPage = () => {
           onStartChat={handleStartChat}
         />
       )}
+    </div>
+        )}
+      </div>
     </div>
   );
 };

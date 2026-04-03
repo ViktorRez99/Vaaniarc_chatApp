@@ -1,10 +1,11 @@
-import { Suspense, useState, useEffect } from "react"
-import { AuthProvider, useAuth } from "./context/AuthContext"
-import Auth from "./components/Auth"
-import LandingPage from "./components/LandingPage"
-import ChatHub from "./components/ChatHub"
-import ErrorBoundary from "./components/ErrorBoundary"
-import Settings from "./components/Settings"
+import { Suspense } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { AuthProvider, useAuth } from "./context/AuthContext";
+import Auth from "./components/Auth";
+import LandingPage from "./components/LandingPage";
+import ChatHub from "./components/ChatHub";
+import ErrorBoundary from "./components/ErrorBoundary";
+import Settings from "./components/Settings";
 
 const LoadingScreen = () => (
   <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-900 to-slate-900 relative overflow-hidden">
@@ -28,85 +29,77 @@ const LoadingScreen = () => (
       </div>
     </div>
   </div>
-)
+);
 
-// Main App Content Component
-const AppContent = () => {
-  const { isAuthenticated, isLoading } = useAuth()
-  const [path, setPath] = useState(window.location.pathname)
-
-  // Simple client-side routing
-  useEffect(() => {
-    const handleRouteChange = () => {
-      setPath(window.location.pathname)
-    }
-
-    window.addEventListener('popstate', handleRouteChange)
-    
-    return () => {
-      window.removeEventListener('popstate', handleRouteChange)
-    }
-  }, [])
+const ProtectedRoute = ({ children }) => {
+  const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
-    return <LoadingScreen />
+    return <LoadingScreen />;
   }
 
-  // If user is at home route and not authenticated, show landing page
-  if (path === '/' && !isAuthenticated) {
-    return <LandingPage />
+  return isAuthenticated ? children : <Navigate to="/auth" replace />;
+};
+
+const PublicOnlyRoute = ({ children }) => {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <LoadingScreen />;
   }
 
-  // For /auth route or when not authenticated
-  if (!isAuthenticated) {
-    // If trying to access protected route while not authenticated, redirect to auth
-    if (path !== '/' && path !== '/auth') {
-      // Use setTimeout to avoid state updates during render
-      setTimeout(() => {
-        window.history.pushState({}, '', '/auth')
-        setPath('/auth')
-      }, 0)
-    }
-    
-    // Show auth page for /auth
-    if (path === '/auth') {
-      return (
-        <div className="min-h-screen w-full">
-          <Auth />
-        </div>
-      )
-    }
-    
-    // Show landing page for root
-    return <LandingPage />
-  }
-  
+  return isAuthenticated ? <Navigate to="/chat" replace /> : children;
+};
 
-  // For authenticated users, check route
-  if (path === '/' || path === '/chat' || path.startsWith('/meeting')) {
-    return (
-      <div className="min-h-screen w-full">
-        <ChatHub />
-      </div>
-    )
-  }
-  // If user is at /settings route
-  if (path === '/settings') {
-    return (
-      <div className="min-h-screen w-full">
-        <Settings />
-      </div>
-    )
-  }
-  
+const AppRoutes = () => {
+  const { isAuthenticated } = useAuth();
 
-  // Default to landing page for authenticated users
   return (
-    <div className="min-h-screen w-full">
-      <LandingPage />
-    </div>
-  )
-}
+    <Routes>
+      <Route
+        path="/"
+        element={
+          <PublicOnlyRoute>
+            <LandingPage />
+          </PublicOnlyRoute>
+        }
+      />
+      <Route
+        path="/auth"
+        element={
+          <PublicOnlyRoute>
+            <Auth />
+          </PublicOnlyRoute>
+        }
+      />
+      <Route
+        path="/chat"
+        element={
+          <ProtectedRoute>
+            <ChatHub />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/meeting/:meetingId"
+        element={
+          <ProtectedRoute>
+            <ChatHub />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <Settings />
+          </ProtectedRoute>
+        }
+      />
+      <Route path="*" element={<Navigate to={isAuthenticated ? "/chat" : "/"} replace />} />
+    </Routes>
+  );
+};
 
 function App() {
   return (
@@ -114,12 +107,12 @@ function App() {
       <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-900 to-slate-900 font-sans">
         <AuthProvider>
           <Suspense fallback={<LoadingScreen />}>
-            <AppContent />
+            <AppRoutes />
           </Suspense>
         </AuthProvider>
       </div>
     </ErrorBoundary>
-  )
+  );
 }
 
-export default App
+export default App;

@@ -1,0 +1,54 @@
+const Device = require('../models/Device');
+const authenticateToken = require('./auth');
+const cacheService = require('../services/cacheService');
+
+const socketAuth = async (socket, next) => {
+  try {
+    const forwardedFor = socket.handshake.headers['x-forwarded-for'];
+    const remoteAddress = typeof forwardedFor === 'string' && forwardedFor.trim()
+      ? forwardedFor.split(',')[0].trim()
+      : (socket.handshake.address || 'unknown');
+    const rateLimitKey = `socket-auth::${remoteAddress}`;
+    const { count: attempts } = await cacheService.rateLimit.increment(rateLimitKey, 60 * 1000);
+
+    if (attempts > 30) {
+      return next(new Error('Authentication error: Too many connection attempts'));
+    }
+
+    const authContext = await authenticateToken.resolveAuthentication({
+      headers: socket.handshake.headers,
+      ip: remoteAddress
+    });
+
+    if (!authContext || authContext.authStrategy !== 'session' || !authContext.session) {
+      return next(new Error('Authentication error: Session required'));
+    }
+
+    socket.userId = authContext.user._id.toString();
+    socket.username = authContext.user.username;
+    socket.email = authContext.user.email;
+    socket.user = authContext.user;
+    socket.session = authContext.session;
+    socket.deviceId = authContext.session.deviceId || null;
+
+    if (socket.deviceId) {
+      const device = await Device.findOne({
+        deviceId: socket.deviceId,
+        user: authContext.user._id,
+        revokedAt: null
+      }).select('-__v');
+
+      if (!device) {
+        return next(new Error('Authentication error: Device not registered or revoked'));
+      }
+
+      socket.device = device;
+    }
+
+    return next();
+  } catch (error) {
+    return next(new Error('Authentication error: Invalid session'));
+  }
+};
+
+module.exports = socketAuth;

@@ -1,4 +1,5 @@
-import { useState, useCallback, useMemo } from "react"
+import { useState, useCallback, useMemo, useEffect } from "react"
+import { useLocation, useNavigate } from "react-router-dom"
 import Cropper from 'react-easy-crop'
 import getCroppedImg from '../utils/cropImage'
 import { useAuth } from "../context/AuthContext"
@@ -133,8 +134,9 @@ const FormField = ({
 }
 
 const Auth = () => {
-  // Check URL for signup parameter
-  const urlParams = new URLSearchParams(window.location.search);
+  const location = useLocation()
+  const navigate = useNavigate()
+  const urlParams = new URLSearchParams(location.search);
   const shouldSignup = urlParams.get('signup') === 'true';
   
   const [isLogin, setIsLogin] = useState(!shouldSignup)
@@ -151,6 +153,12 @@ const Auth = () => {
   })
 
   const { login, register, isLoading, error, clearError } = useAuth()
+
+  useEffect(() => {
+    setIsLogin(!shouldSignup)
+    setStep(1)
+    clearError()
+  }, [shouldSignup])
 
   // Image cropping state
   const [imageSrc, setImageSrc] = useState(null)
@@ -254,16 +262,14 @@ const Auth = () => {
         })
       }
       
-      // Redirect to chat after successful authentication
-      window.history.pushState({}, '', '/chat')
-      window.dispatchEvent(new PopStateEvent('popstate'))
+      navigate('/chat')
     } catch (error) {
       console.error("Auth error:", error)
     }
   }
 
   const toggleAuthMode = useCallback(() => {
-    setIsLogin(!isLogin)
+    navigate(isLogin ? '/auth?signup=true' : '/auth')
     setStep(1)
     setFormData({
       username: "",
@@ -276,7 +282,7 @@ const Auth = () => {
       bio: "",
     })
     clearError()
-  }, [isLogin, clearError])
+  }, [isLogin, clearError, navigate])
 
   const avatars = [
     "https://api.dicebear.com/7.x/avataaars/svg?seed=Felix",
@@ -338,7 +344,7 @@ const Auth = () => {
               className={`flex-1 py-2.5 px-3 rounded-lg z-10 relative transition-all duration-300 font-semibold text-sm focus:outline-none focus:ring-0 border-none bg-transparent ${
                 isLogin ? "text-white" : "text-gray-400 hover:text-gray-300"
               }`}
-              onClick={() => setIsLogin(true)}
+              onClick={() => navigate('/auth')}
               type="button"
             >
               <span className="relative z-10">Sign In</span>
@@ -347,7 +353,7 @@ const Auth = () => {
               className={`flex-1 py-2.5 px-3 rounded-lg z-10 relative transition-all duration-300 font-semibold text-sm focus:outline-none focus:ring-0 border-none bg-transparent ${
                 !isLogin ? "text-white" : "text-gray-400 hover:text-gray-300"
               }`}
-              onClick={() => setIsLogin(false)}
+              onClick={() => navigate('/auth?signup=true')}
               type="button"
             >
               <span className="relative z-10">Sign Up</span>
