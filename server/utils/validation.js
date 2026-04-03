@@ -2,6 +2,29 @@
  * Validation utility functions
  */
 
+const PASSWORD_POLICY = {
+  minLength: Number.parseInt(process.env.PASSWORD_MIN_LENGTH || '10', 10),
+  maxLength: 128,
+  requireUppercase: true,
+  requireLowercase: true,
+  requireNumber: true,
+  requireSymbol: true
+};
+
+const COMMON_PASSWORDS = new Set([
+  '123456',
+  '12345678',
+  '123456789',
+  'admin123',
+  'changeme',
+  'letmein',
+  'password',
+  'password1',
+  'qwerty123',
+  'welcome1'
+]);
+const COMMON_PASSWORD_PATTERNS = ['password', 'qwerty', '123456', 'letmein', 'changeme', 'welcome'];
+
 /**
  * Validate email format
  * @param {string} email - Email address to validate
@@ -47,21 +70,74 @@ const validateUsername = (username) => {
  * @returns {Object} - Validation result with isValid, strength, and error message
  */
 const validatePassword = (password) => {
-  if (!password) {
+  if (!password || typeof password !== 'string') {
     return { isValid: false, strength: 'none', error: 'Password is required' };
   }
-  
-  if (password.length < 6) {
-    return { isValid: false, strength: 'weak', error: 'Password must be at least 6 characters long' };
+
+  if (password.length < PASSWORD_POLICY.minLength) {
+    return {
+      isValid: false,
+      strength: 'weak',
+      error: `Password must be at least ${PASSWORD_POLICY.minLength} characters long`
+    };
   }
-  
+
+  if (password.length > PASSWORD_POLICY.maxLength) {
+    return {
+      isValid: false,
+      strength: 'weak',
+      error: `Password must be ${PASSWORD_POLICY.maxLength} characters or less`
+    };
+  }
+
+  const loweredPassword = password.toLowerCase();
+
+  if (
+    COMMON_PASSWORDS.has(loweredPassword)
+    || COMMON_PASSWORD_PATTERNS.some((pattern) => loweredPassword.includes(pattern))
+  ) {
+    return {
+      isValid: false,
+      strength: 'weak',
+      error: 'Password is too common. Choose a more unique password.'
+    };
+  }
+
+  const checks = [
+    {
+      passed: !PASSWORD_POLICY.requireUppercase || /[A-Z]/.test(password),
+      message: 'one uppercase letter'
+    },
+    {
+      passed: !PASSWORD_POLICY.requireLowercase || /[a-z]/.test(password),
+      message: 'one lowercase letter'
+    },
+    {
+      passed: !PASSWORD_POLICY.requireNumber || /[0-9]/.test(password),
+      message: 'one number'
+    },
+    {
+      passed: !PASSWORD_POLICY.requireSymbol || /[^a-zA-Z0-9]/.test(password),
+      message: 'one symbol'
+    }
+  ];
+
+  const unmetRequirements = checks.filter((check) => !check.passed);
+  if (unmetRequirements.length) {
+    return {
+      isValid: false,
+      strength: 'weak',
+      error: `Password must include at least ${unmetRequirements.map((check) => check.message).join(', ')}`
+    };
+  }
+
   let strength = 'weak';
   let score = 0;
-  
+
   // Length check
   if (password.length >= 8) score += 1;
   if (password.length >= 12) score += 1;
-  
+
   // Complexity checks
   if (/[a-z]/.test(password)) score += 1;
   if (/[A-Z]/.test(password)) score += 1;
@@ -244,6 +320,7 @@ const validateStatus = (status) => {
 };
 
 module.exports = {
+  PASSWORD_POLICY,
   isValidEmail,
   validateUsername,
   validatePassword,

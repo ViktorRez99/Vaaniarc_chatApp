@@ -1,6 +1,7 @@
 const {
   buildPrivacyFields,
   hasUserConsumedViewOnce,
+  isViewOnceContentConsumed,
   isMessageExpired,
   markViewOnceConsumed,
   redactPrivateMessageForUser,
@@ -39,11 +40,18 @@ describe('messagePrivacy', () => {
     const message = {
       sender: 'sender-1',
       isViewOnce: true,
+      content: 'secret.png',
+      fileUrl: '/uploads/secret.png',
+      fileMetadata: { originalName: 'secret.png' },
       viewedBy: []
     };
 
     expect(markViewOnceConsumed(message, 'recipient-1')).toBe(true);
     expect(hasUserConsumedViewOnce(message, 'recipient-1')).toBe(true);
+    expect(isViewOnceContentConsumed(message)).toBe(true);
+    expect(message.content).toBe('View-once attachment already opened');
+    expect(message.fileUrl).toBeNull();
+    expect(message.fileMetadata).toBeNull();
     expect(markViewOnceConsumed(message, 'recipient-1')).toBe(false);
     expect(hasUserConsumedViewOnce(message, 'sender-1')).toBe(false);
   });
@@ -62,6 +70,20 @@ describe('messagePrivacy', () => {
       fileUrl: null,
       fileMetadata: null,
       content: 'View-once attachment already opened',
+      isViewOnceConsumed: true
+    });
+
+    expect(redactPrivateMessageForUser({
+      sender: 'sender-1',
+      isViewOnce: true,
+      viewOnceConsumedAt: new Date(),
+      content: 'secret.png',
+      fileUrl: '/uploads/test.vaani',
+      fileMetadata: { originalName: 'secret.png' }
+    }, 'sender-1')).toMatchObject({
+      content: 'View-once attachment already opened',
+      fileUrl: null,
+      fileMetadata: null,
       isViewOnceConsumed: true
     });
   });

@@ -60,9 +60,17 @@ const privateMessageSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  revocableUntil: {
+    type: Date,
+    default: () => new Date(Date.now() + (15 * 60 * 1000))
+  },
   isViewOnce: {
     type: Boolean,
     default: false
+  },
+  viewOnceConsumedAt: {
+    type: Date,
+    default: null
   },
   viewedBy: [{
     user: {
@@ -125,8 +133,9 @@ privateMessageSchema.index({ chatId: 1, createdAt: -1 });
 privateMessageSchema.index({ chatId: 1, read: 1, createdAt: -1 });
 privateMessageSchema.index({ chatId: 1, expiresAt: 1, createdAt: -1 });
 privateMessageSchema.index({ sender: 1, createdAt: -1 });
-privateMessageSchema.index({ expiresAt: 1 });
+privateMessageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 privateMessageSchema.index({ chatId: 1, sender: 1, tempId: 1 }, { sparse: true });
+privateMessageSchema.index({ replyTo: 1, createdAt: -1 });
 
 privateMessageSchema.methods.addReaction = function addReaction(userId, emoji) {
   const existingReaction = this.reactions.find((reaction) => (
@@ -161,6 +170,7 @@ privateMessageSchema.methods.editContent = function editContent(nextContent) {
 privateMessageSchema.methods.softDelete = function softDelete() {
   this.isDeleted = true;
   this.deletedAt = new Date();
+  this.revocableUntil = new Date();
   this.content = 'This message has been deleted';
   this.encryptedContent = null;
   this.fileUrl = null;
@@ -180,11 +190,8 @@ privateMessageSchema.methods.canEdit = function canEdit(userId) {
 };
 
 privateMessageSchema.methods.canDelete = function canDelete(userId) {
-  const messageAge = Date.now() - this.createdAt.getTime();
-  const maxDeleteTime = 60 * 60 * 1000;
-
   return this.sender.toString() === userId.toString()
-    && messageAge < maxDeleteTime
+    && (!this.revocableUntil || this.revocableUntil.getTime() > Date.now())
     && !this.isDeleted;
 };
 

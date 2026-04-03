@@ -9,6 +9,8 @@ const {
   logLogout,
   logPasswordChange
 } = require('../middleware/auditLog');
+const { validatePassword } = require('../utils/validation');
+const { parsePaginationLimit } = require('../utils/pagination');
 
 const router = express.Router();
 const requireCsrf = authenticateToken.requireCsrf;
@@ -29,9 +31,10 @@ router.post('/register', authLimiter, async (req, res) => {
       });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ 
-        message: 'Password must be at least 6 characters long' 
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.isValid) {
+      return res.status(400).json({
+        message: passwordValidation.error
       });
     }
 
@@ -469,9 +472,10 @@ router.put('/change-password', authenticateToken, requireCsrf, async (req, res) 
       });
     }
 
-    if (newPassword.length < 6) {
-      return res.status(400).json({ 
-        message: 'New password must be at least 6 characters long' 
+    const passwordValidation = validatePassword(newPassword);
+    if (!passwordValidation.isValid) {
+      return res.status(400).json({
+        message: passwordValidation.error
       });
     }
 
@@ -565,7 +569,7 @@ router.get('/users/search', authenticateToken, async (req, res) => {
       ]
     })
     .select('username email avatar status lastSeen')
-    .limit(parseInt(limit))
+    .limit(parsePaginationLimit(limit, 10, 50))
     .sort({ username: 1 });
 
     res.json({ users });

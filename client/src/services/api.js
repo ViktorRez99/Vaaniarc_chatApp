@@ -20,6 +20,14 @@ const getCookieValue = (name) => {
   return cookie ? decodeURIComponent(cookie.slice(cookiePrefix.length)) : null;
 };
 
+const createIdempotencyKey = (prefix = "mutation") => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `${prefix}:${crypto.randomUUID()}`;
+  }
+
+  return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+};
+
 class ApiService {
   constructor() {
     this.deviceId = getOrCreateDeviceId();
@@ -492,6 +500,9 @@ class ApiService {
   async addReaction(messageId, emoji) {
     return this.apiCall(`/chat/messages/${messageId}/reactions`, {
       method: 'POST',
+      headers: {
+        'X-Idempotency-Key': createIdempotencyKey('reaction-add')
+      },
       body: JSON.stringify({ emoji }),
     });
   }
@@ -499,19 +510,28 @@ class ApiService {
   async removeReaction(messageId, emoji) {
     return this.apiCall(`/chat/messages/${messageId}/reactions/${encodeURIComponent(emoji)}`, {
       method: 'DELETE',
+      headers: {
+        'X-Idempotency-Key': createIdempotencyKey('reaction-remove')
+      },
     });
   }
 
-  async editMessage(messageId, content) {
+  async editMessage(messageId, content, expectedUpdatedAt = null) {
     return this.apiCall(`/chat/messages/${messageId}`, {
       method: 'PUT',
-      body: JSON.stringify({ content }),
+      headers: {
+        'X-Idempotency-Key': createIdempotencyKey('message-edit')
+      },
+      body: JSON.stringify({ content, expectedUpdatedAt }),
     });
   }
 
   async deleteMessage(messageId) {
     return this.apiCall(`/chat/messages/${messageId}`, {
       method: 'DELETE',
+      headers: {
+        'X-Idempotency-Key': createIdempotencyKey('message-delete')
+      },
     });
   }
 

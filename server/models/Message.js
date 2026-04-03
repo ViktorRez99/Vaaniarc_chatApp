@@ -84,9 +84,17 @@ const messageSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  revocableUntil: {
+    type: Date,
+    default: () => new Date(Date.now() + (15 * 60 * 1000))
+  },
   isViewOnce: {
     type: Boolean,
     default: false
+  },
+  viewOnceConsumedAt: {
+    type: Date,
+    default: null
   },
   viewedBy: [{
     user: {
@@ -146,8 +154,9 @@ messageSchema.index({ room: 1, isDeleted: 1, createdAt: -1 });
 messageSchema.index({ room: 1, expiresAt: 1, createdAt: -1 });
 messageSchema.index({ sender: 1, recipient: 1, createdAt: -1 });
 messageSchema.index({ isDeleted: 1, createdAt: -1 });
-messageSchema.index({ expiresAt: 1 });
+messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 messageSchema.index({ room: 1, sender: 1, tempId: 1 }, { sparse: true });
+messageSchema.index({ replyTo: 1, createdAt: -1 });
 
 // Mark message as read by user
 messageSchema.methods.markAsRead = function(userId) {
@@ -202,6 +211,8 @@ messageSchema.methods.editContent = function(newContent) {
 messageSchema.methods.softDelete = function() {
   this.isDeleted = true;
   this.deletedAt = new Date();
+  this.revocableUntil = new Date();
+  this.encryptedContent = null;
   this.content.text = 'This message has been deleted';
   if (this.content.file) {
     this.content.file = null;
@@ -222,11 +233,8 @@ messageSchema.methods.canEdit = function(userId) {
 
 // Check if user can delete this message
 messageSchema.methods.canDelete = function(userId) {
-  const messageAge = Date.now() - this.createdAt.getTime();
-  const maxDeleteTime = 60 * 60 * 1000; // 1 hour
-  
   return this.sender.toString() === userId.toString() && 
-         messageAge < maxDeleteTime && 
+         (!this.revocableUntil || this.revocableUntil.getTime() > Date.now()) &&
          !this.isDeleted;
 };
 

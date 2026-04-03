@@ -1,5 +1,8 @@
-﻿const mongoose = require('mongoose');
+const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+
+const cacheService = require('../services/cacheService');
+const { validatePassword } = require('../utils/validation');
 
 const userSchema = new mongoose.Schema({
   username: {
@@ -41,7 +44,16 @@ const userSchema = new mongoose.Schema({
   password: {
     type: String,
     required: true,
-    minlength: 6
+    minlength: 10,
+    maxlength: 128,
+    validate: {
+      validator(value) {
+        return validatePassword(value).isValid;
+      },
+      message(props) {
+        return validatePassword(props.value).error;
+      }
+    }
   },
   avatar: {
     type: String,
@@ -95,9 +107,166 @@ userSchema.index({ email: 1 });
 userSchema.index({ username: 1 });
 userSchema.index({ status: 1, lastSeen: -1 });
 
+const cleanupUserRelationships = async (userId) => {
+  const [
+    Session,
+    Device,
+    Chat,
+    PrivateMessage,
+    Message,
+    Room,
+    Channel,
+    ChannelPost,
+    Community,
+    TwoFactor,
+    KeyTransparencyEntry
+  ] = [
+    mongoose.model('Session'),
+    mongoose.model('Device'),
+    mongoose.model('Chat'),
+    mongoose.model('PrivateMessage'),
+    mongoose.model('Message'),
+    mongoose.model('Room'),
+    mongoose.model('Channel'),
+    mongoose.model('ChannelPost'),
+    mongoose.model('Community'),
+    mongoose.model('TwoFactor'),
+    mongoose.model('KeyTransparencyEntry')
+  ];
+
+  const userSessions = await Session.find({ user: userId }).select('tokenHash').lean();
+  await Promise.all(userSessions.map((session) => cacheService.session.delete(session.tokenHash)));
+
+  const privateChats = await Chat.find({
+    type: 'private',
+    participants: userId
+  }).select('_id').lean();
+  const privateChatIds = privateChats.map((chat) => chat._id);
+  const now = new Date();
+
+  await Promise.all([
+    Session.deleteMany({ user: userId }),
+    Device.deleteMany({ user: userId }),
+    TwoFactor.deleteMany({ user: userId }),
+    KeyTransparencyEntry.deleteMany({ user: userId }),
+    privateChatIds.length ? PrivateMessage.deleteMany({ chatId: { $in: privateChatIds } }) : Promise.resolve(),
+    privateChatIds.length ? Chat.deleteMany({ _id: { $in: privateChatIds } }) : Promise.resolve(),
+    PrivateMessage.updateMany(
+      { sender: userId, chatId: { $nin: privateChatIds } },
+      {
+        $set: {
+          isDeleted: true,
+          deletedAt: now,
+          content: 'User account deleted',
+          encryptedContent: null,
+          fileUrl: null,
+          fileMetadata: null,
+          revocableUntil: now
+        }
+      }
+    ),
+    Message.updateMany(
+      { sender: userId },
+      {
+        $set: {
+          isDeleted: true,
+          deletedAt: now,
+          encryptedContent: null,
+          revocableUntil: now,
+          'content.text': 'User account deleted',
+          'content.file': null
+        }
+      }
+    ),
+    Chat.updateMany(
+      { participants: userId },
+      { $pull: { participants: userId } }
+    ),
+    Room.updateMany(
+      { 'members.user': userId },
+      {
+        $pull: {
+          members: { user: userId },
+          admins: userId,
+          moderators: userId
+        }
+      }
+    ),
+    Room.updateMany(
+      { creator: userId },
+      { $set: { isActive: false } }
+    ),
+    Channel.updateMany(
+      { 'members.user': userId },
+      {
+        $pull: {
+          members: { user: userId },
+          admins: userId
+        }
+      }
+    ),
+    Channel.updateMany(
+      { owner: userId },
+      { $set: { isActive: false } }
+    ),
+    Community.updateMany(
+      { 'members.user': userId },
+      {
+        $pull: {
+          members: { user: userId },
+          admins: userId
+        }
+      }
+    ),
+    Community.updateMany(
+      { owner: userId },
+      { $set: { isActive: false } }
+    ),
+    ChannelPost.deleteMany({ author: userId })
+  ]);
+};
+
+const loadUserIdForQuery = async (queryContext) => {
+  const existingUser = await queryContext.model.findOne(queryContext.getFilter()).select('_id').lean();
+  return existingUser?._id || null;
+};
+
+userSchema.pre('deleteOne', { document: true, query: false }, async function(next) {
+  try {
+    await cleanupUserRelationships(this._id);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+userSchema.pre('deleteOne', { document: false, query: true }, async function(next) {
+  try {
+    const userId = await loadUserIdForQuery(this);
+    if (userId) {
+      await cleanupUserRelationships(userId);
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+userSchema.pre('findOneAndDelete', async function(next) {
+  try {
+    const userId = await loadUserIdForQuery(this);
+    if (userId) {
+      await cleanupUserRelationships(userId);
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
-  
+
   try {
     const salt = await bcrypt.genSalt(12);
     this.password = await bcrypt.hash(this.password, salt);

@@ -8,10 +8,13 @@ const socketAuth = async (socket, next) => {
     const remoteAddress = typeof forwardedFor === 'string' && forwardedFor.trim()
       ? forwardedFor.split(',')[0].trim()
       : (socket.handshake.address || 'unknown');
-    const rateLimitKey = `socket-auth::${remoteAddress}`;
-    const { count: attempts } = await cacheService.rateLimit.increment(rateLimitKey, 60 * 1000);
+    const requestedDeviceId = typeof socket.handshake.headers['x-device-id'] === 'string'
+      ? socket.handshake.headers['x-device-id'].trim()
+      : 'unknown-device';
+    const rateLimitKey = `socket-auth::${remoteAddress}::${requestedDeviceId}`;
+    const { count: attempts } = await cacheService.rateLimit.increment(rateLimitKey, 15 * 60 * 1000);
 
-    if (attempts > 30) {
+    if (attempts > 10) {
       return next(new Error('Authentication error: Too many connection attempts'));
     }
 

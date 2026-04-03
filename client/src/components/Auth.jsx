@@ -3,13 +3,14 @@ import { useLocation, useNavigate } from "react-router-dom"
 import Cropper from 'react-easy-crop'
 import getCroppedImg from '../utils/cropImage'
 import { useAuth } from "../context/AuthContext"
+import { PASSWORD_POLICY } from "../utils/passwordPolicy"
 
 const PasswordStrengthIndicator = ({ password }) => {
   const strength = useMemo(() => {
     if (!password) return { level: 0, text: "", color: "" }
 
     let score = 0
-    if (password.length >= 8) score++
+    if (password.length >= PASSWORD_POLICY.minLength) score++
     if (/[A-Z]/.test(password)) score++
     if (/[a-z]/.test(password)) score++
     if (/[0-9]/.test(password)) score++
@@ -384,7 +385,7 @@ const Auth = () => {
                   onChange={handleInputChange}
                   placeholder="Password"
                   required
-                  minLength={6}
+                  minLength={PASSWORD_POLICY.minLength}
                   showPasswordStrength={false}
                   icon="🔒"
                   compact={true}
@@ -447,7 +448,7 @@ const Auth = () => {
                   onChange={handleInputChange}
                   placeholder="Create Password"
                   required
-                  minLength={6}
+                  minLength={PASSWORD_POLICY.minLength}
                   showPasswordStrength={true}
                   icon="🔒"
                   compact={true}

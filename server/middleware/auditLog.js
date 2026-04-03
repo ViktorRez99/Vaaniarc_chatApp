@@ -9,7 +9,20 @@ const auditLogSchema = new mongoose.Schema({
   action: {
     type: String,
     required: true,
-    enum: ['login', 'logout', 'password_change', '2fa_enable', '2fa_disable', 'message_delete', 'profile_update', 'device_added', 'device_removed']
+    enum: [
+      'login',
+      'logout',
+      'password_change',
+      '2fa_enable',
+      '2fa_disable',
+      'message_delete',
+      'message_edit',
+      'message_moderation',
+      'profile_update',
+      'device_added',
+      'device_removed',
+      'user_deleted'
+    ]
   },
   details: {
     type: mongoose.Schema.Types.Mixed,
@@ -49,10 +62,19 @@ const logLogout = (userId, req) => auditLog(userId, 'logout', {}, req);
 const logPasswordChange = (userId, req) => auditLog(userId, 'password_change', {}, req);
 const log2FAEnable = (userId, req) => auditLog(userId, '2fa_enable', {}, req);
 const log2FADisable = (userId, req) => auditLog(userId, '2fa_disable', {}, req);
-const logMessageDelete = (userId, messageId, req) => auditLog(userId, 'message_delete', { messageId }, req);
+const logMessageDelete = (userId, messageId, req, details = {}) => (
+  auditLog(userId, 'message_delete', { messageId, ...details }, req)
+);
+const logMessageEdit = (userId, messageId, req, details = {}) => (
+  auditLog(userId, 'message_edit', { messageId, ...details }, req)
+);
+const logMessageModeration = (userId, targetId, req, details = {}) => (
+  auditLog(userId, 'message_moderation', { targetId, ...details }, req)
+);
 const logProfileUpdate = (userId, changes, req) => auditLog(userId, 'profile_update', { changes }, req);
 const logDeviceAdded = (userId, deviceId, deviceName, req) => auditLog(userId, 'device_added', { deviceId, deviceName }, req);
 const logDeviceRemoved = (userId, deviceId, req) => auditLog(userId, 'device_removed', { deviceId }, req);
+const logUserDeleted = (userId, req, details = {}) => auditLog(userId, 'user_deleted', details, req);
 
 module.exports = {
   AuditLog,
@@ -63,8 +85,11 @@ module.exports = {
   log2FAEnable,
   log2FADisable,
   logMessageDelete,
+  logMessageEdit,
+  logMessageModeration,
   logProfileUpdate,
   logDeviceAdded,
-  logDeviceRemoved
+  logDeviceRemoved,
+  logUserDeleted
 };
 

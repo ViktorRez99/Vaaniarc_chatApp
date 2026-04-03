@@ -48,12 +48,21 @@ const validateDeviceBoundPayload = ({
   requireSelfEnvelope = false
 }) => {
   const metadata = getPayloadMetadata({ encryptedContent, encryptionPayload });
+  const hasSecurePayload = Boolean(encryptedContent || encryptionPayload);
 
-  if (metadata.protocolVersion < 2) {
+  if (!hasSecurePayload) {
     return {
       ...metadata,
       isValid: true,
       error: null
+    };
+  }
+
+  if (metadata.protocolVersion < 2) {
+    return {
+      ...metadata,
+      isValid: false,
+      error: 'Encrypted payloads must use protocol version 2 or newer.'
     };
   }
 

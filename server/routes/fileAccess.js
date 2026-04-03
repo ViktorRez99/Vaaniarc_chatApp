@@ -9,6 +9,7 @@ const Chat = require('../models/Chat');
 const authenticateToken = require('../middleware/auth');
 const {
   hasUserConsumedViewOnce,
+  isViewOnceContentConsumed,
   isMessageExpired
 } = require('../utils/messagePrivacy');
 const { arrayIncludesId } = require('../utils/idHelpers');
@@ -63,7 +64,7 @@ const canAccessPrivateMessageFile = async (message, userId) => {
     return false;
   }
 
-  if (isMessageExpired(message) || hasUserConsumedViewOnce(message, userId)) {
+  if (isMessageExpired(message) || isViewOnceContentConsumed(message) || hasUserConsumedViewOnce(message, userId)) {
     return 'gone';
   }
 
@@ -80,7 +81,7 @@ const canAccessRoomMessageFile = async (message, userId) => {
     return false;
   }
 
-  if (isMessageExpired(message) || hasUserConsumedViewOnce(message, userId)) {
+  if (isMessageExpired(message) || isViewOnceContentConsumed(message) || hasUserConsumedViewOnce(message, userId)) {
     return 'gone';
   }
 

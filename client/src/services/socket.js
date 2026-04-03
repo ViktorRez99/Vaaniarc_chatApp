@@ -307,11 +307,12 @@ class SocketService {
     });
   }
 
-  editPrivateMessage(chatId, messageId, content) {
+  editPrivateMessage(chatId, messageId, content, expectedUpdatedAt = null) {
     this.emit('private_message_edit', {
       chatId,
       messageId,
-      content
+      content,
+      expectedUpdatedAt
     });
   }
 

@@ -1,4 +1,8 @@
 const mongoose = require('mongoose');
+const {
+  buildPrivateParticipantHash,
+  normalizePrivateParticipantIds
+} = require('../utils/chatParticipants');
 
 const chatSchema = new mongoose.Schema({
   participants: [{
@@ -10,6 +14,10 @@ const chatSchema = new mongoose.Schema({
     type: String,
     enum: ['private', 'group'],
     default: 'private'
+  },
+  participantHash: {
+    type: String,
+    default: undefined
   },
   name: {
     type: String,
@@ -30,5 +38,22 @@ const chatSchema = new mongoose.Schema({
 // Index for efficient queries
 chatSchema.index({ participants: 1, updatedAt: -1 });
 chatSchema.index({ type: 1, updatedAt: -1 });
+chatSchema.index({ participantHash: 1 }, { unique: true, sparse: true });
+
+chatSchema.pre('validate', function(next) {
+  if (this.type !== 'private') {
+    this.participantHash = undefined;
+    return next();
+  }
+
+  const normalizedParticipants = normalizePrivateParticipantIds(this.participants);
+  if (normalizedParticipants.length !== 2) {
+    return next(new Error('Private chats must contain exactly two unique participants.'));
+  }
+
+  this.participants = normalizedParticipants;
+  this.participantHash = buildPrivateParticipantHash(normalizedParticipants);
+  return next();
+});
 
 module.exports = mongoose.model('Chat', chatSchema);

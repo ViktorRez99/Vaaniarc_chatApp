@@ -6,6 +6,7 @@ const User = require('../models/User');
 const cacheService = require('../services/cacheService');
 const { enqueueBackgroundJob } = require('../services/backgroundJobs');
 const { arrayIncludesId } = require('../utils/idHelpers');
+const { parsePaginationLimit } = require('../utils/pagination');
 const { validateDeviceBoundPayload } = require('../utils/e2eePayloads');
 const { emitToDeviceRooms, resolveAuthorizedDeviceIds } = require('../utils/deviceDelivery');
 const { findExistingRoomMessage } = require('../utils/messageIdempotency');
@@ -26,7 +27,10 @@ const {
 
 const invalidateRoomCache = (roomId) => {
   const cachePrefix = `room-details:${roomId}:`;
-  return cacheService.memory.deleteByPrefix(cachePrefix);
+  return Promise.all([
+    cacheService.memory.deleteByPrefix(cachePrefix),
+    cacheService.memory.delete(`typing-room:${roomId}`)
+  ]);
 };
 
 // Get all rooms for the authenticated user
@@ -60,6 +64,7 @@ router.get('/rooms', async (req, res) => {
 router.get('/rooms/public', async (req, res) => {
   try {
     const { search, limit = 20 } = req.query;
+    const safeLimit = parsePaginationLimit(limit, 20, 50);
     
     const query = {
       type: 'public',
@@ -77,7 +82,7 @@ router.get('/rooms/public', async (req, res) => {
       .populate('creator', 'username avatar')
       .select('name description type creator members maxMembers lastActivity')
       .sort({ lastActivity: -1 })
-      .limit(parseInt(limit));
+      .limit(safeLimit);
     
     res.json(rooms);
   } catch (error) {
@@ -489,6 +494,7 @@ router.get('/rooms/:roomId/messages', async (req, res) => {
     const { roomId } = req.params;
     const { limit = 50, before } = req.query;
     const userId = req.user._id;
+    const safeLimit = parsePaginationLimit(limit, 50, 50);
 
     // Verify room exists and user is a member
     const room = await Room.findById(roomId);
@@ -517,7 +523,7 @@ router.get('/rooms/:roomId/messages', async (req, res) => {
       .populate('sender', 'username avatar')
       .populate('replyTo', 'content sender')
       .sort({ createdAt: -1 })
-      .limit(parseInt(limit));
+      .limit(safeLimit);
 
     res.json(messages.reverse().map((message) => redactRoomMessageForUser(message, userId)));
   } catch (error) {
@@ -555,6 +561,18 @@ router.post('/rooms/:roomId/messages', async (req, res) => {
 
     if (!payloadValidation.isValid) {
       return res.status(400).json({ message: payloadValidation.error });
+    }
+
+    if (replyTo) {
+      const replyMessage = await Message.findOne({
+        _id: replyTo,
+        room: roomId,
+        isDeleted: false
+      }).select('_id');
+
+      if (!replyMessage) {
+        return res.status(404).json({ message: 'Reply target not found in this room' });
+      }
     }
 
     // Validate message

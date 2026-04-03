@@ -34,8 +34,14 @@ const { validateDeviceBoundPayload } = require('./utils/e2eePayloads');
 const { emitToDeviceRooms, resolveAuthorizedDeviceIds } = require('./utils/deviceDelivery');
 const { findExistingPrivateMessage, findExistingRoomMessage } = require('./utils/messageIdempotency');
 const { buildPrivacyFields } = require('./utils/messagePrivacy');
+const { detachPrivateReplyThread } = require('./utils/messageThreads');
+const { assertExpectedUpdatedAt } = require('./utils/optimisticLock');
 const { resolveStoredTextContent } = require('./utils/secureMessaging');
 const { emitSocketEvent, unpackSocketPayload } = require('./utils/socketPayloads');
+const {
+  logMessageDelete,
+  logMessageEdit
+} = require('./middleware/auditLog');
 const {
   populatePrivateMessage,
   serializePrivateMessageForUser
@@ -175,6 +181,32 @@ const emitToUserRooms = ({ ioInstance, eventName, payload, userIds = [] }) => {
     emitSocketEvent(ioInstance.to(`user:${targetUserId}`), eventName, payload);
   });
 };
+
+const loadTypingChatParticipants = (chatId) => cacheService.memory.remember(
+  `typing-chat:${chatId}`,
+  15000,
+  async () => {
+    const chat = await Chat.findById(chatId).select('participants').lean();
+    return Array.isArray(chat?.participants)
+      ? chat.participants.map((participantId) => normalizeId(participantId)).filter(Boolean)
+      : null;
+  }
+);
+
+const loadTypingRoomMembers = (roomId) => cacheService.memory.remember(
+  `typing-room:${roomId}`,
+  15000,
+  async () => {
+    const room = await Room.findById(roomId).select('members.user isActive').lean();
+    if (!room || !room.isActive) {
+      return null;
+    }
+
+    return (room.members || [])
+      .map((member) => normalizeId(member.user))
+      .filter(Boolean);
+  }
+);
 
 io.use(socketAuth);
 
@@ -345,11 +377,17 @@ io.on('connection', (socket) => {
   socket.on('typing_start', async (data) => {
     try {
       const { chatId } = data;
-      const chat = await Chat.findById(chatId);
-      if (chat && arrayIncludesId(chat.participants, userId)) {
-        chat.participants.forEach(participantId => {
-          if (!arrayIncludesId([participantId], userId)) {
-            io.to('user:' + normalizeId(participantId)).emit('user_typing', { chatId, userId, username: socket.user.username });
+      const participantIds = await loadTypingChatParticipants(chatId);
+      const normalizedUserId = normalizeId(userId);
+
+      if (participantIds?.includes(normalizedUserId)) {
+        participantIds.forEach((participantId) => {
+          if (participantId !== normalizedUserId) {
+            emitSocketEvent(io.to(`user:${participantId}`), 'user_typing', {
+              chatId,
+              userId,
+              username: socket.user.username
+            });
           }
         });
       }
@@ -361,11 +399,16 @@ io.on('connection', (socket) => {
   socket.on('typing_stop', async (data) => {
     try {
       const { chatId } = data;
-      const chat = await Chat.findById(chatId);
-      if (chat && arrayIncludesId(chat.participants, userId)) {
-        chat.participants.forEach(participantId => {
-          if (!arrayIncludesId([participantId], userId)) {
-            io.to('user:' + normalizeId(participantId)).emit('user_stop_typing', { chatId, userId });
+      const participantIds = await loadTypingChatParticipants(chatId);
+      const normalizedUserId = normalizeId(userId);
+
+      if (participantIds?.includes(normalizedUserId)) {
+        participantIds.forEach((participantId) => {
+          if (participantId !== normalizedUserId) {
+            emitSocketEvent(io.to(`user:${participantId}`), 'user_stop_typing', {
+              chatId,
+              userId
+            });
           }
         });
       }
@@ -464,7 +507,7 @@ io.on('connection', (socket) => {
 
   socket.on('private_message_edit', async (data) => {
     try {
-      const { chatId, messageId, content } = data;
+      const { chatId, messageId, content, expectedUpdatedAt = null } = data;
       const trimmedContent = typeof content === 'string' ? content.trim() : '';
 
       if (!chatId || !messageId || !trimmedContent) {
@@ -489,6 +532,10 @@ io.on('connection', (socket) => {
         return socket.emit('error', { message: 'This message can no longer be edited' });
       }
 
+      if (expectedUpdatedAt) {
+        assertExpectedUpdatedAt(message, expectedUpdatedAt);
+      }
+
       if (message.encryptedContent || Number(message.protocolVersion || 1) >= 2) {
         return socket.emit('error', { message: 'Secure messages cannot be edited in place' });
       }
@@ -506,9 +553,14 @@ io.on('connection', (socket) => {
         },
         userIds: chat.participants
       });
+      await logMessageEdit(userId, messageId, null, {
+        chatId
+      });
     } catch (error) {
       logger.error('Private edit error', error);
-      socket.emit('error', { message: 'Failed to edit message' });
+      socket.emit('error', {
+        message: error?.statusCode ? error.message : 'Failed to edit message'
+      });
     }
   });
 
@@ -536,6 +588,7 @@ io.on('connection', (socket) => {
 
       message.softDelete();
       await message.save();
+      const detachedReplyIds = await detachPrivateReplyThread(message._id);
       await populatePrivateMessage(message);
 
       emitToUserRooms({
@@ -543,9 +596,14 @@ io.on('connection', (socket) => {
         eventName: 'private_message_delete',
         payload: {
           chatId,
+          detachedReplyIds,
           message: message.toObject()
         },
         userIds: chat.participants
+      });
+      await logMessageDelete(userId, messageId, null, {
+        chatId,
+        detachedReplyIds
       });
     } catch (error) {
       logger.error('Private delete error', error);
@@ -629,6 +687,18 @@ io.on('connection', (socket) => {
 
       if (!storedText) {
         return socket.emit('error', { message: 'Message content cannot be empty' });
+      }
+
+      if (replyTo) {
+        const replyMessage = await Message.findOne({
+          _id: replyTo,
+          room: roomId,
+          isDeleted: false
+        }).select('_id');
+
+        if (!replyMessage) {
+          return socket.emit('error', { message: 'Reply target not found in this room' });
+        }
       }
 
       let authorizedTargetDeviceIds = [];
@@ -722,8 +792,8 @@ io.on('connection', (socket) => {
   socket.on('room_typing_start', async (data) => {
     try {
       const { roomId } = data;
-      const room = await Room.findById(roomId);
-      if (room && room.isMember(userId)) {
+      const memberIds = await loadTypingRoomMembers(roomId);
+      if (memberIds?.includes(normalizeId(userId))) {
         socket.to('room:' + roomId).emit('user_typing_room', { roomId, userId, username: socket.user.username });
       }
     } catch (error) {
@@ -734,8 +804,8 @@ io.on('connection', (socket) => {
   socket.on('room_typing_stop', async (data) => {
     try {
       const { roomId } = data;
-      const room = await Room.findById(roomId);
-      if (room && room.isMember(userId)) {
+      const memberIds = await loadTypingRoomMembers(roomId);
+      if (memberIds?.includes(normalizeId(userId))) {
         socket.to('room:' + roomId).emit('user_stop_typing_room', { roomId, userId });
       }
     } catch (error) {

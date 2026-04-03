@@ -60,6 +60,8 @@ const isMessageExpired = (message, now = new Date()) => {
   return new Date(message.expiresAt).getTime() <= now.getTime();
 };
 
+const isViewOnceContentConsumed = (message) => Boolean(message?.isViewOnce && message?.viewOnceConsumedAt);
+
 const hasUserConsumedViewOnce = (message, userId) => {
   if (!message?.isViewOnce || !userId) {
     return false;
@@ -77,6 +79,35 @@ const hasUserConsumedViewOnce = (message, userId) => {
   );
 };
 
+const clearViewOncePayload = (message) => {
+  if (!message) {
+    return;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(message, 'fileUrl')) {
+    message.fileUrl = null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(message, 'fileMetadata')) {
+    message.fileMetadata = null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(message, 'encryptedContent')) {
+    message.encryptedContent = null;
+  }
+
+  if (message.content && typeof message.content === 'object' && !Array.isArray(message.content)) {
+    message.content = {
+      ...(message.content || {}),
+      text: VIEW_ONCE_PLACEHOLDER,
+      file: null
+    };
+    return;
+  }
+
+  message.content = VIEW_ONCE_PLACEHOLDER;
+};
+
 const markViewOnceConsumed = (message, userId) => {
   if (!message?.isViewOnce || !userId) {
     return false;
@@ -86,6 +117,10 @@ const markViewOnceConsumed = (message, userId) => {
   const normalizedUserId = normalizeId(userId);
 
   if (!normalizedUserId || senderId === normalizedUserId) {
+    return false;
+  }
+
+  if (isViewOnceContentConsumed(message)) {
     return false;
   }
 
@@ -105,12 +140,14 @@ const markViewOnceConsumed = (message, userId) => {
     user: userId,
     viewedAt: new Date()
   });
+  message.viewOnceConsumedAt = new Date();
+  clearViewOncePayload(message);
 
   return true;
 };
 
 const redactPrivateMessageForUser = (message, userId) => {
-  if (!hasUserConsumedViewOnce(message, userId)) {
+  if (!isViewOnceContentConsumed(message) && !hasUserConsumedViewOnce(message, userId)) {
     return message;
   }
 
@@ -123,7 +160,7 @@ const redactPrivateMessageForUser = (message, userId) => {
 };
 
 const redactRoomMessageForUser = (message, userId) => {
-  if (!hasUserConsumedViewOnce(message, userId)) {
+  if (!isViewOnceContentConsumed(message) && !hasUserConsumedViewOnce(message, userId)) {
     return message;
   }
 
@@ -156,6 +193,7 @@ module.exports = {
   buildActiveMessageQuery,
   buildPrivacyFields,
   hasUserConsumedViewOnce,
+  isViewOnceContentConsumed,
   isMessageExpired,
   markViewOnceConsumed,
   redactPrivateMessageForUser,

@@ -29,6 +29,11 @@ const {
   buildAvatarUrl,
   ensureUploadsDirectory
 } = require('../utils/uploadFiles');
+const {
+  IMAGE_UPLOAD_MIME_TYPES,
+  isUploadMimeAllowed,
+  validateStoredUpload
+} = require('../utils/uploadValidation');
 
 const router = express.Router();
 
@@ -44,16 +49,10 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-  if (req.body?.encryptedFilePayload && file.mimetype === 'application/octet-stream') {
-    cb(null, true);
-    return;
-  }
-
-  const allowedTypes = process.env.ALLOWED_FILE_TYPES ? 
-    process.env.ALLOWED_FILE_TYPES.split(',') : 
-    ['image/jpeg', 'image/png', 'image/gif', 'text/plain', 'application/pdf', 'application/octet-stream'];
-  
-  if (allowedTypes.includes(file.mimetype)) {
+  if (isUploadMimeAllowed({
+    mimetype: file.mimetype,
+    encryptedFilePayload: req.body?.encryptedFilePayload
+  })) {
     cb(null, true);
   } else {
     cb(new Error(`File type ${file.mimetype} is not allowed`), false);
@@ -83,6 +82,11 @@ const cleanupUploadedFile = async (filePath) => {
   }
 };
 
+const cleanupAndRespond = async (filePath, res, statusCode, payload) => {
+  await cleanupUploadedFile(filePath);
+  return res.status(statusCode).json(payload);
+};
+
 // Upload file and send as message to room (group chat)
 router.post('/file', upload.single('file'), async (req, res) => {
   try {
@@ -93,23 +97,32 @@ router.post('/file', upload.single('file'), async (req, res) => {
     }
 
     if (!roomId) {
-      return res.status(400).json({ message: 'Room ID is required' });
+      return cleanupAndRespond(req.file.path, res, 400, { message: 'Room ID is required' });
     }
 
     // Verify user is a member of the room
     const room = await Room.findById(roomId);
     if (!room || !room.isActive) {
-      return res.status(404).json({ message: 'Room not found' });
+      return cleanupAndRespond(req.file.path, res, 404, { message: 'Room not found' });
     }
     if (!room.isMember(req.user._id)) {
-      return res.status(403).json({ 
+      return cleanupAndRespond(req.file.path, res, 403, {
         message: 'Access denied. Not a member of this room.' 
       });
     }
     if (!room.settings.allowFileSharing) {
-      return res.status(403).json({ 
+      return cleanupAndRespond(req.file.path, res, 403, {
         message: 'File sharing is disabled in this room' 
       });
+    }
+
+    const uploadValidation = await validateStoredUpload({
+      filePath: req.file.path,
+      mimetype: req.file.mimetype,
+      encryptedFilePayload
+    });
+    if (!uploadValidation.isValid) {
+      return cleanupAndRespond(req.file.path, res, 400, { message: uploadValidation.error });
     }
 
     // Create file URL
@@ -123,7 +136,7 @@ router.post('/file', upload.single('file'), async (req, res) => {
     const { protocolVersion, senderDeviceId, targetDeviceIds } = payloadValidation;
 
     if (!payloadValidation.isValid) {
-      return res.status(400).json({ message: payloadValidation.error });
+      return cleanupAndRespond(req.file.path, res, 400, { message: payloadValidation.error });
     }
 
     let authorizedTargetDeviceIds = [];
@@ -134,7 +147,7 @@ router.post('/file', upload.single('file'), async (req, res) => {
       });
 
       if (authorizedTargetDeviceIds.length !== targetDeviceIds.length) {
-        return res.status(400).json({ message: 'The encrypted attachment targets unauthorized devices.' });
+        return cleanupAndRespond(req.file.path, res, 400, { message: 'The encrypted attachment targets unauthorized devices.' });
       }
     }
 
@@ -251,6 +264,7 @@ router.post('/file', upload.single('file'), async (req, res) => {
     });
   } catch (error) {
     console.error('File upload error:', error);
+    await cleanupUploadedFile(req.file?.path);
     
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({ 
@@ -287,18 +301,27 @@ router.post('/chat-file', upload.single('file'), async (req, res) => {
     }
 
     if (!chatId) {
-      return res.status(400).json({ message: 'Chat ID is required' });
+      return cleanupAndRespond(req.file.path, res, 400, { message: 'Chat ID is required' });
     }
 
     // Verify user is part of the chat
     const chat = await Chat.findById(chatId);
     if (!chat) {
-      return res.status(404).json({ message: 'Chat not found' });
+      return cleanupAndRespond(req.file.path, res, 404, { message: 'Chat not found' });
     }
     if (!arrayIncludesId(chat.participants, req.user._id)) {
-      return res.status(403).json({ 
+      return cleanupAndRespond(req.file.path, res, 403, {
         message: 'Access denied. Not a participant in this chat.' 
       });
+    }
+
+    const uploadValidation = await validateStoredUpload({
+      filePath: req.file.path,
+      mimetype: req.file.mimetype,
+      encryptedFilePayload
+    });
+    if (!uploadValidation.isValid) {
+      return cleanupAndRespond(req.file.path, res, 400, { message: uploadValidation.error });
     }
 
     // Create file URL
@@ -313,7 +336,7 @@ router.post('/chat-file', upload.single('file'), async (req, res) => {
     const { protocolVersion, senderDeviceId, targetDeviceIds } = payloadValidation;
 
     if (!payloadValidation.isValid) {
-      return res.status(400).json({ message: payloadValidation.error });
+      return cleanupAndRespond(req.file.path, res, 400, { message: payloadValidation.error });
     }
 
     let authorizedTargetDeviceIds = [];
@@ -324,7 +347,7 @@ router.post('/chat-file', upload.single('file'), async (req, res) => {
       });
 
       if (authorizedTargetDeviceIds.length !== targetDeviceIds.length) {
-        return res.status(400).json({ message: 'The encrypted attachment targets unauthorized devices.' });
+        return cleanupAndRespond(req.file.path, res, 400, { message: 'The encrypted attachment targets unauthorized devices.' });
       }
     }
 
@@ -446,6 +469,7 @@ router.post('/chat-file', upload.single('file'), async (req, res) => {
     });
   } catch (error) {
     console.error('Chat file upload error:', error);
+    await cleanupUploadedFile(req.file?.path);
     
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({ 
@@ -473,8 +497,13 @@ router.post('/avatar', upload.single('avatar'), async (req, res) => {
     }
 
     // Only allow image files for avatars
-    if (!req.file.mimetype.startsWith('image/')) {
-      return res.status(400).json({ 
+    const avatarValidation = await validateStoredUpload({
+      filePath: req.file.path,
+      mimetype: req.file.mimetype,
+      allowedMimetypes: IMAGE_UPLOAD_MIME_TYPES
+    });
+    if (!avatarValidation.isValid) {
+      return cleanupAndRespond(req.file.path, res, 400, {
         message: 'Avatar must be an image file' 
       });
     }
@@ -485,7 +514,7 @@ router.post('/avatar', upload.single('avatar'), async (req, res) => {
     const User = require('../models/User');
     const user = await User.findById(req.user._id);
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return cleanupAndRespond(req.file.path, res, 404, { message: 'User not found' });
     }
 
     user.avatar = avatarUrl;
@@ -497,6 +526,7 @@ router.post('/avatar', upload.single('avatar'), async (req, res) => {
     });
   } catch (error) {
     console.error('Avatar upload error:', error);
+    await cleanupUploadedFile(req.file?.path);
     
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(413).json({ 

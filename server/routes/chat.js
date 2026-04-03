@@ -5,10 +5,26 @@ const PrivateMessage = require('../models/PrivateMessage');
 const User = require('../models/User');
 const cacheService = require('../services/cacheService');
 const { arrayIncludesId } = require('../utils/idHelpers');
+const {
+  buildPrivateParticipantHash,
+  normalizePrivateParticipantIds
+} = require('../utils/chatParticipants');
 const { validateDeviceBoundPayload } = require('../utils/e2eePayloads');
 const { emitToDeviceRooms, resolveAuthorizedDeviceIds } = require('../utils/deviceDelivery');
 const { findExistingPrivateMessage } = require('../utils/messageIdempotency');
+const {
+  loadIdempotentResponse,
+  requireIdempotencyKey,
+  storeIdempotentResponse
+} = require('../utils/operationIdempotency');
+const { assertExpectedUpdatedAt } = require('../utils/optimisticLock');
+const { detachPrivateReplyThread } = require('../utils/messageThreads');
+const { parsePaginationLimit } = require('../utils/pagination');
 const { enqueueBackgroundJob } = require('../services/backgroundJobs');
+const {
+  logMessageDelete,
+  logMessageEdit
+} = require('../middleware/auditLog');
 const {
   PRIVATE_MESSAGE_SELECT,
   populatePrivateMessage,
@@ -80,38 +96,83 @@ router.post('/chats', async (req, res) => {
       return res.status(400).json({ message: 'Recipient ID is required' });
     }
 
+    const normalizedParticipants = normalizePrivateParticipantIds([userId, recipientId]);
+    if (normalizedParticipants.length !== 2) {
+      return res.status(400).json({ message: 'A private chat requires exactly two different users' });
+    }
+
     // Check if recipient exists
     const recipient = await User.findById(recipientId);
     if (!recipient) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Check if chat already exists
-    let chat = await Chat.findOne({
-      type: 'private',
-      participants: { $all: [userId, recipientId], $size: 2 }
-    })
-      .populate('participants', 'username avatar status')
-      .populate({
-        path: 'lastMessage',
-        select: PRIVATE_MESSAGE_SELECT
-      });
+    const participantHash = buildPrivateParticipantHash(normalizedParticipants);
 
-    // Create new chat if it doesn't exist
-    if (!chat) {
-      chat = new Chat({
-        participants: [userId, recipientId],
-        type: 'private'
-      });
-      await chat.save();
-      
-      // Populate after saving
-      chat = await Chat.findById(chat._id)
+    let chat;
+    const existingLegacyChat = await Chat.findOne({
+      type: 'private',
+      participants: { $all: normalizedParticipants, $size: 2 }
+    });
+
+    if (existingLegacyChat) {
+      let legacyChatId = existingLegacyChat._id;
+      if (!existingLegacyChat.participantHash) {
+        existingLegacyChat.participantHash = participantHash;
+        try {
+          await existingLegacyChat.save();
+        } catch (error) {
+          if (error?.code !== 11000) {
+            throw error;
+          }
+
+          const hashedChat = await Chat.findOne({ participantHash }).select('_id');
+          if (hashedChat?._id) {
+            legacyChatId = hashedChat._id;
+          }
+        }
+      }
+
+      chat = await Chat.findById(legacyChatId)
         .populate('participants', 'username avatar status')
         .populate({
           path: 'lastMessage',
           select: PRIVATE_MESSAGE_SELECT
         });
+    } else {
+      try {
+        chat = await Chat.findOneAndUpdate(
+          { participantHash },
+          {
+            $setOnInsert: {
+              participants: normalizedParticipants,
+              participantHash,
+              type: 'private'
+            }
+          },
+          {
+            new: true,
+            upsert: true,
+            setDefaultsOnInsert: true
+          }
+        )
+          .populate('participants', 'username avatar status')
+          .populate({
+            path: 'lastMessage',
+            select: PRIVATE_MESSAGE_SELECT
+          });
+      } catch (error) {
+        if (error?.code !== 11000) {
+          throw error;
+        }
+
+        chat = await Chat.findOne({ participantHash })
+          .populate('participants', 'username avatar status')
+          .populate({
+            path: 'lastMessage',
+            select: PRIVATE_MESSAGE_SELECT
+          });
+      }
     }
 
     const nextChat = chat.toObject();
@@ -132,6 +193,7 @@ router.get('/chats/:chatId/messages', async (req, res) => {
     const { chatId } = req.params;
     const { limit = 50, before } = req.query;
     const userId = req.user._id;
+    const safeLimit = parsePaginationLimit(limit, 50, 50);
 
     // Verify user is part of the chat
     const chat = await Chat.findById(chatId);
@@ -153,7 +215,7 @@ router.get('/chats/:chatId/messages', async (req, res) => {
 
     const messages = await populatePrivateMessage(PrivateMessage.find(query)
       .sort({ createdAt: -1 })
-      .limit(parseInt(limit)));
+      .limit(safeLimit));
 
     res.json(serializePrivateMessagesForUser(messages.reverse(), userId));
   } catch (error) {
@@ -359,6 +421,10 @@ router.post('/chats/:chatId/messages/:messageId/consume-view-once', async (req, 
     const consumed = markViewOnceConsumed(message, userId);
     if (consumed) {
       await message.save();
+      emitPrivateMessageEvent(req, chat, 'private_message_edit', {
+        chatId: chat._id.toString(),
+        message: message.toObject()
+      });
     }
 
     res.json({
@@ -376,6 +442,20 @@ router.post('/chat/messages/:messageId/reactions', async (req, res) => {
     const { messageId } = req.params;
     const emoji = typeof req.body?.emoji === 'string' ? req.body.emoji.trim() : '';
     const userId = req.user._id;
+    const idempotencyKey = requireIdempotencyKey(req, res);
+
+    if (!idempotencyKey) {
+      return;
+    }
+
+    const cachedPayload = await loadIdempotentResponse({
+      scope: `private-message-reaction:${messageId}`,
+      userId,
+      idempotencyKey
+    });
+    if (cachedPayload) {
+      return res.json(cachedPayload);
+    }
 
     if (!emoji) {
       return res.status(400).json({ message: 'Emoji is required' });
@@ -410,6 +490,13 @@ router.post('/chat/messages/:messageId/reactions', async (req, res) => {
     };
     emitPrivateMessageEvent(req, chat, 'private_message_reaction', payload);
 
+    await storeIdempotentResponse({
+      scope: `private-message-reaction:${messageId}`,
+      userId,
+      idempotencyKey,
+      payload
+    });
+
     res.json(payload);
   } catch (error) {
     console.error('Error updating private message reaction:', error);
@@ -422,6 +509,20 @@ router.delete('/chat/messages/:messageId/reactions/:emoji', async (req, res) => 
     const { messageId, emoji } = req.params;
     const trimmedEmoji = typeof emoji === 'string' ? decodeURIComponent(emoji).trim() : '';
     const userId = req.user._id;
+    const idempotencyKey = requireIdempotencyKey(req, res);
+
+    if (!idempotencyKey) {
+      return;
+    }
+
+    const cachedPayload = await loadIdempotentResponse({
+      scope: `private-message-reaction-remove:${messageId}`,
+      userId,
+      idempotencyKey
+    });
+    if (cachedPayload) {
+      return res.json(cachedPayload);
+    }
 
     if (!trimmedEmoji) {
       return res.status(400).json({ message: 'Emoji is required' });
@@ -447,6 +548,13 @@ router.delete('/chat/messages/:messageId/reactions/:emoji', async (req, res) => 
     };
     emitPrivateMessageEvent(req, chat, 'private_message_reaction', payload);
 
+    await storeIdempotentResponse({
+      scope: `private-message-reaction-remove:${messageId}`,
+      userId,
+      idempotencyKey,
+      payload
+    });
+
     res.json(payload);
   } catch (error) {
     console.error('Error removing private message reaction:', error);
@@ -458,10 +566,29 @@ router.put('/chat/messages/:messageId', async (req, res) => {
   try {
     const { messageId } = req.params;
     const content = typeof req.body?.content === 'string' ? req.body.content.trim() : '';
+    const expectedUpdatedAt = req.body?.expectedUpdatedAt || null;
     const userId = req.user._id;
+    const idempotencyKey = requireIdempotencyKey(req, res);
+
+    if (!idempotencyKey) {
+      return;
+    }
+
+    const cachedPayload = await loadIdempotentResponse({
+      scope: `private-message-edit:${messageId}`,
+      userId,
+      idempotencyKey
+    });
+    if (cachedPayload) {
+      return res.json(cachedPayload);
+    }
 
     if (!content) {
       return res.status(400).json({ message: 'Message content is required' });
+    }
+
+    if (!expectedUpdatedAt) {
+      return res.status(400).json({ message: 'expectedUpdatedAt is required for message edits' });
     }
 
     if (content.length > 2000) {
@@ -482,6 +609,8 @@ router.put('/chat/messages/:messageId', async (req, res) => {
       return res.status(400).json({ message: 'This message can no longer be edited' });
     }
 
+    assertExpectedUpdatedAt(message, expectedUpdatedAt);
+
     if (message.encryptedContent || Number(message.protocolVersion || 1) >= 2) {
       return res.status(400).json({ message: 'Secure messages cannot be edited in place' });
     }
@@ -496,9 +625,22 @@ router.put('/chat/messages/:messageId', async (req, res) => {
     };
     emitPrivateMessageEvent(req, chat, 'private_message_edit', payload);
 
+    await logMessageEdit(userId, messageId, req, {
+      chatId: chat._id.toString()
+    });
+    await storeIdempotentResponse({
+      scope: `private-message-edit:${messageId}`,
+      userId,
+      idempotencyKey,
+      payload
+    });
+
     res.json(payload);
   } catch (error) {
     console.error('Error editing private message:', error);
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({ message: error.message });
+    }
     res.status(500).json({ message: 'Failed to edit the message' });
   }
 });
@@ -507,6 +649,20 @@ router.delete('/chat/messages/:messageId', async (req, res) => {
   try {
     const { messageId } = req.params;
     const userId = req.user._id;
+    const idempotencyKey = requireIdempotencyKey(req, res);
+
+    if (!idempotencyKey) {
+      return;
+    }
+
+    const cachedPayload = await loadIdempotentResponse({
+      scope: `private-message-delete:${messageId}`,
+      userId,
+      idempotencyKey
+    });
+    if (cachedPayload) {
+      return res.json(cachedPayload);
+    }
 
     const message = await PrivateMessage.findById(messageId);
     if (!message) {
@@ -524,13 +680,26 @@ router.delete('/chat/messages/:messageId', async (req, res) => {
 
     message.softDelete();
     await message.save();
+    const detachedReplyIds = await detachPrivateReplyThread(message._id);
     await populatePrivateMessage(message);
 
     const payload = {
       chatId: chat._id.toString(),
+      detachedReplyIds,
       message: message.toObject()
     };
     emitPrivateMessageEvent(req, chat, 'private_message_delete', payload);
+
+    await logMessageDelete(userId, messageId, req, {
+      chatId: chat._id.toString(),
+      detachedReplyIds
+    });
+    await storeIdempotentResponse({
+      scope: `private-message-delete:${messageId}`,
+      userId,
+      idempotencyKey,
+      payload
+    });
 
     res.json(payload);
   } catch (error) {

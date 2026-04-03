@@ -7,6 +7,7 @@ const { buildUniqueSlug } = require('../utils/slug');
 const logger = require('../utils/logger');
 const { arrayIncludesId, normalizeId } = require('../utils/idHelpers');
 const { buildConversationId } = require('../utils/conversationHelpers');
+const { logMessageModeration } = require('../middleware/auditLog');
 
 const router = express.Router();
 
@@ -375,6 +376,58 @@ router.post('/channels/:channelId/posts', async (req, res) => {
   } catch (error) {
     logger.error('Channel post creation error', error);
     res.status(500).json({ message: 'Failed to publish channel post' });
+  }
+});
+
+router.delete('/channels/:channelId/posts/:postId', async (req, res) => {
+  try {
+    const { channelId, postId } = req.params;
+    const userId = req.user._id;
+    const channel = await Channel.findById(channelId);
+
+    if (!channel || !channel.isActive) {
+      return res.status(404).json({ message: 'Channel not found' });
+    }
+
+    if (!channel.isAdmin(userId)) {
+      return res.status(403).json({ message: 'Only channel admins can moderate posts' });
+    }
+
+    const post = await ChannelPost.findOne({
+      _id: postId,
+      channel: channel._id
+    });
+
+    if (!post) {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+
+    await post.deleteOne();
+    channel.lastActivity = new Date();
+    await channel.save();
+
+    const payload = {
+      channelId: normalizeId(channel._id),
+      postId: normalizeId(postId)
+    };
+    const io = req.app.get('io');
+
+    if (io) {
+      io.to(`channel:${normalizeId(channel._id)}`).emit('channel_post_delete', payload);
+    }
+
+    await logMessageModeration(userId, postId, req, {
+      channelId: normalizeId(channel._id),
+      action: 'delete_channel_post'
+    });
+
+    res.json({
+      message: 'Post removed successfully',
+      ...payload
+    });
+  } catch (error) {
+    logger.error('Channel post moderation error', error);
+    res.status(500).json({ message: 'Failed to remove the channel post' });
   }
 });
 

@@ -7,6 +7,7 @@ import {
   getPushStatus,
   syncPushSubscription
 } from '../services/notifications';
+import { PASSWORD_POLICY, validatePassword } from '../utils/passwordPolicy';
 
 export default function Settings() {
   const navigate = useNavigate();
@@ -384,8 +385,9 @@ export default function Settings() {
       setError('New passwords do not match!');
       return;
     }
-    if (passwordData.newPassword.length < 6) {
-      setError('Password must be at least 6 characters!');
+    const passwordValidation = validatePassword(passwordData.newPassword);
+    if (!passwordValidation.isValid) {
+      setError(passwordValidation.error);
       return;
     }
 
@@ -998,6 +1000,7 @@ export default function Settings() {
                   type="password"
                   value={passwordData.newPassword}
                   onChange={(e) => setPasswordData({...passwordData, newPassword: e.target.value})}
+                  minLength={PASSWORD_POLICY.minLength}
                   className="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white font-medium placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all backdrop-blur-sm"
                   placeholder="Enter new password"
                 />
@@ -1008,6 +1011,7 @@ export default function Settings() {
                   type="password"
                   value={passwordData.confirmPassword}
                   onChange={(e) => setPasswordData({...passwordData, confirmPassword: e.target.value})}
+                  minLength={PASSWORD_POLICY.minLength}
                   className="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white font-medium placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all backdrop-blur-sm"
                   placeholder="Confirm new password"
                 />

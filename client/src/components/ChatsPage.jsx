@@ -347,7 +347,7 @@ const ChatsPage = () => {
       const content = messageInput.trim();
 
       if (editingMessage?._id) {
-        const response = await api.editMessage(editingMessage._id, content);
+        const response = await api.editMessage(editingMessage._id, content, editingMessage.updatedAt);
         const updatedMessage = await cryptoService.hydratePrivateMessage(response?.message || response?.data?.message);
         if (updatedMessage) {
           updateMessageEverywhere(updatedMessage);

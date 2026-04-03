@@ -89,4 +89,27 @@ describe('e2eePayloads', () => {
       isValid: false
     });
   });
+
+  it('rejects malformed or legacy encrypted payloads', () => {
+    expect(validateDeviceBoundPayload({
+      encryptedContent: 'not-json',
+      authenticatedDeviceId: 'device-1',
+      requireSelfEnvelope: true
+    })).toMatchObject({
+      isValid: false,
+      error: expect.stringMatching(/protocol version 2 or newer/i)
+    });
+
+    expect(validateDeviceBoundPayload({
+      encryptedContent: JSON.stringify({
+        version: 1,
+        senderDeviceId: 'device-1'
+      }),
+      authenticatedDeviceId: 'device-1',
+      requireSelfEnvelope: true
+    })).toMatchObject({
+      isValid: false,
+      error: expect.stringMatching(/protocol version 2 or newer/i)
+    });
+  });
 });
