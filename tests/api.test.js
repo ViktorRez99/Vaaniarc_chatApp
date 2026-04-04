@@ -1,9 +1,14 @@
 const request = require('supertest');
+const User = require('../server/models/User');
 
 // Load app after env from setupFiles
 const { app } = require('../server/server');
 
 describe('VaaniArc API', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
   describe('public routes', () => {
     it('GET / returns API metadata', async () => {
       const res = await request(app).get('/').expect(200);
@@ -38,16 +43,49 @@ describe('VaaniArc API', () => {
         .post('/api/auth/register')
         .send({
           username: 'validuser',
-          email: 'shortpw@test.local',
           password: '12345'
         })
         .expect(400);
       expect(String(res.body.message).toLowerCase()).toMatch(/password|6/);
     });
 
+    it('POST /api/auth/register rejects invalid optional email', async () => {
+      const res = await request(app)
+        .post('/api/auth/register')
+        .send({
+          username: 'validuser',
+          email: 'not-an-email',
+          password: 'StrongPass123!'
+        })
+        .expect(400);
+
+      expect(String(res.body.message).toLowerCase()).toMatch(/valid email/);
+    });
+
     it('POST /api/auth/login rejects missing credentials', async () => {
       const res = await request(app).post('/api/auth/login').send({}).expect(400);
       expect(res.body.message).toBeDefined();
+    });
+
+    it('POST /api/auth/login handles a populated request without throwing', async () => {
+      const findOneSpy = jest.spyOn(User, 'findOne').mockResolvedValueOnce(null);
+
+      const res = await request(app)
+        .post('/api/auth/login')
+        .send({
+          identifier: 'validuser',
+          password: 'StrongPass123!'
+        })
+        .expect(401);
+
+      expect(res.body.message).toBe('Invalid credentials');
+      expect(findOneSpy).toHaveBeenCalledWith({
+        $or: [
+          { username: 'validuser' },
+          { email: 'validuser' }
+        ],
+        isActive: true
+      });
     });
   });
 

@@ -9,7 +9,10 @@ const {
   logLogout,
   logPasswordChange
 } = require('../middleware/auditLog');
-const { validatePassword } = require('../utils/validation');
+const {
+  isValidEmail,
+  validatePassword
+} = require('../utils/validation');
 const { parsePaginationLimit } = require('../utils/pagination');
 
 const router = express.Router();
@@ -18,16 +21,23 @@ const createSession = authenticateToken.createSession;
 const setSessionCookies = authenticateToken.setSessionCookies;
 const clearSessionCookies = authenticateToken.clearSessionCookies;
 const revokeSession = authenticateToken.revokeSession;
+const normalizeIdentifier = (value) => typeof value === 'string' ? value.trim() : '';
+const normalizeOptionalEmail = (value) => {
+  const normalizedValue = normalizeIdentifier(value).toLowerCase();
+  return normalizedValue || null;
+};
 
 // Register new user
 router.post('/register', authLimiter, async (req, res) => {
   try {
     const { username, email, password, bio, firstName, lastName, phone, location, avatar } = req.body;
+    const normalizedUsername = normalizeIdentifier(username);
+    const normalizedEmail = normalizeOptionalEmail(email);
 
     // Validation
-    if (!username || !email || !password) {
+    if (!normalizedUsername || !password) {
       return res.status(400).json({ 
-        message: 'Username, email, and password are required' 
+        message: 'Username and password are required' 
       });
     }
 
@@ -38,30 +48,39 @@ router.post('/register', authLimiter, async (req, res) => {
       });
     }
 
-    if (username.length < 3 || username.length > 30) {
+    if (normalizedUsername.length < 3 || normalizedUsername.length > 30) {
       return res.status(400).json({ 
         message: 'Username must be between 3 and 30 characters' 
       });
     }
 
+    if (normalizedEmail && !isValidEmail(normalizedEmail)) {
+      return res.status(400).json({
+        message: 'Please enter a valid email'
+      });
+    }
+
     // Check if user already exists
     const existingUser = await User.findOne({
-      $or: [{ email: email.toLowerCase().trim() }, { username: username.trim() }]
+      $or: [
+        { username: normalizedUsername },
+        ...(normalizedEmail ? [{ email: normalizedEmail }] : [])
+      ]
     });
 
     if (existingUser) {
-      if (existingUser.email === email.toLowerCase().trim()) {
+      if (normalizedEmail && existingUser.email === normalizedEmail) {
         return res.status(409).json({ message: 'Email already registered' });
       }
-      if (existingUser.username === username.trim()) {
+      if (existingUser.username === normalizedUsername) {
         return res.status(409).json({ message: 'Username already taken' });
       }
     }
 
     // Create new user
     const user = new User({
-      username: username.trim(),
-      email: email.trim().toLowerCase(),
+      username: normalizedUsername,
+      email: normalizedEmail || undefined,
       password,
       bio: bio || '',
       firstName: firstName || '',
@@ -91,7 +110,7 @@ router.post('/register', authLimiter, async (req, res) => {
       user: {
         id: user._id,
         username: user.username,
-        email: user.email,
+        email: user.email || null,
         bio: user.bio,
         firstName: user.firstName,
         lastName: user.lastName,
@@ -127,19 +146,22 @@ router.post('/register', authLimiter, async (req, res) => {
 // Login user
 router.post('/login', authLimiter, async (req, res) => {
   try {
-    const { identifier, password } = req.body; // identifier can be email or username
+    const rawIdentifier = req.body?.identifier ?? req.body?.username ?? '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const identifier = normalizeIdentifier(rawIdentifier);
+    const normalizedEmail = normalizeOptionalEmail(identifier);
 
     if (!identifier || !password) {
       return res.status(400).json({ 
-        message: 'Email/username and password are required' 
+        message: 'Username or email and password are required' 
       });
     }
 
     // Find user by email or username
     const user = await User.findOne({
       $or: [
-        { email: identifier.toLowerCase().trim() },
-        { username: identifier.trim() }
+        { username: identifier },
+        { email: normalizedEmail || identifier.toLowerCase() }
       ],
       isActive: true
     });
@@ -178,7 +200,7 @@ router.post('/login', authLimiter, async (req, res) => {
       user: {
         id: user._id,
         username: user.username,
-        email: user.email,
+        email: user.email || null,
         bio: user.bio,
         firstName: user.firstName,
         lastName: user.lastName,
@@ -233,7 +255,7 @@ router.get('/profile', authenticateToken, async (req, res) => {
       user: {
         id: user._id,
         username: user.username,
-        email: user.email,
+        email: user.email || null,
         bio: user.bio,
         firstName: user.firstName,
         lastName: user.lastName,
@@ -251,7 +273,7 @@ router.get('/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Update user profile (PATCH for partial updates including email)
+// Update user profile (PATCH for partial updates)
 router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
   try {
     const { username, email, bio, firstName, lastName, phone, location, avatar } = req.body;
@@ -263,14 +285,16 @@ router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
 
     // Update username if provided and different
     if (username && username !== user.username) {
-      if (username.length < 3 || username.length > 30) {
+      const normalizedUsername = normalizeIdentifier(username);
+
+      if (normalizedUsername.length < 3 || normalizedUsername.length > 30) {
         return res.status(400).json({ 
           message: 'Username must be between 3 and 30 characters' 
         });
       }
 
       const existingUser = await User.findOne({ 
-        username: username.trim(), 
+        username: normalizedUsername, 
         _id: { $ne: user._id } 
       });
       
@@ -278,21 +302,32 @@ router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
         return res.status(409).json({ message: 'Username already taken' });
       }
       
-      user.username = username.trim();
+      user.username = normalizedUsername;
     }
 
-    // Update email if provided and different
-    if (email && email.toLowerCase().trim() !== user.email) {
-      const existingUser = await User.findOne({ 
-        email: email.toLowerCase().trim(), 
-        _id: { $ne: user._id } 
-      });
-      
-      if (existingUser) {
-        return res.status(409).json({ message: 'Email already in use' });
+    // Update or clear email if provided
+    if (email !== undefined) {
+      const normalizedEmail = normalizeOptionalEmail(email);
+      const currentEmail = user.email || null;
+
+      if (normalizedEmail && !isValidEmail(normalizedEmail)) {
+        return res.status(400).json({ message: 'Please enter a valid email' });
       }
-      
-      user.email = email.toLowerCase().trim();
+
+      if (normalizedEmail !== currentEmail) {
+        if (normalizedEmail) {
+          const existingUser = await User.findOne({ 
+            email: normalizedEmail, 
+            _id: { $ne: user._id } 
+          });
+          
+          if (existingUser) {
+            return res.status(409).json({ message: 'Email already in use' });
+          }
+        }
+        
+        user.email = normalizedEmail || undefined;
+      }
     }
 
     // Update other fields
@@ -319,7 +354,7 @@ router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
       user: {
         id: user._id,
         username: user.username,
-        email: user.email,
+        email: user.email || null,
         bio: user.bio,
         firstName: user.firstName,
         lastName: user.lastName,
@@ -437,7 +472,7 @@ router.put('/profile', authenticateToken, requireCsrf, async (req, res) => {
       user: {
         id: user._id,
         username: user.username,
-        email: user.email,
+        email: user.email || null,
         bio: user.bio,
         avatar: user.avatar,
         status: user.status,
@@ -535,7 +570,7 @@ router.get('/verify', authenticateToken, (req, res) => {
     user: {
       id: req.user._id,
       username: req.user.username,
-      email: req.user.email
+      email: req.user.email || null
     },
     session: {
       deviceId: req.deviceId || null,
@@ -560,15 +595,10 @@ router.get('/users/search', authenticateToken, async (req, res) => {
       $and: [
         { _id: { $ne: req.user._id } }, // Exclude current user
         { isActive: true },
-        {
-          $or: [
-            { username: searchRegex },
-            { email: searchRegex }
-          ]
-        }
+        { username: searchRegex }
       ]
     })
-    .select('username email avatar status lastSeen')
+    .select('username avatar status lastSeen')
     .limit(parsePaginationLimit(limit, 10, 50))
     .sort({ username: 1 });
 

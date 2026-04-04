@@ -1025,20 +1025,39 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
+const listenOnPort = (port) => new Promise((resolve, reject) => {
+  const handleError = (error) => {
+    server.off('listening', handleListening);
+    reject(error);
+  };
+
+  const handleListening = () => {
+    server.off('error', handleError);
+    resolve();
+  };
+
+  server.once('error', handleError);
+  server.once('listening', handleListening);
+  server.listen(port);
+});
+
 const startServer = async () => {
   await connectWithRetry();
   await cacheService.connect();
   await configureSocketAdapter(io);
 
-  server.listen(PORT, () => {
-    logger.info('Server running on port ' + PORT);
-    logger.info('Environment: ' + (process.env.NODE_ENV || 'development'));
-  });
+  await listenOnPort(PORT);
+  logger.info('Server running on port ' + PORT);
+  logger.info('Environment: ' + (process.env.NODE_ENV || 'development'));
 };
 
 if (process.env.NODE_ENV !== 'test') {
   startServer().catch((error) => {
-    logger.error('Server startup failed', error);
+    if (error?.code === 'EADDRINUSE') {
+      logger.error(`Server startup failed: port ${PORT} is already in use`);
+    } else {
+      logger.error('Server startup failed', error);
+    }
     process.exitCode = 1;
   });
 }

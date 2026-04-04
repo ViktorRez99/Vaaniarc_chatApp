@@ -10,7 +10,7 @@
     "client:build": "cd client && npm run build",
     "build": "npm run client:build",
     "setup": "npm install && cd client && npm install && cd ..",
-    "dev:full": "concurrently \"npm run dev\" \"npm run client\"",
+    "dev:full": "node scripts/dev-full.js",
     "vercel-build": "npm run build",
     "postinstall": "cd client && npm install",
     "test": "jest && npm --prefix client run test",
