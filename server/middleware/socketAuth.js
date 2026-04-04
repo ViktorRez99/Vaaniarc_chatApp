@@ -1,9 +1,14 @@
 const Device = require('../models/Device');
 const authenticateToken = require('./auth');
 const cacheService = require('../services/cacheService');
+const { isDatabaseReady } = require('../services/databaseService');
 
 const socketAuth = async (socket, next) => {
   try {
+    if (!isDatabaseReady()) {
+      return next(new Error('Authentication error: Database unavailable'));
+    }
+
     const forwardedFor = socket.handshake.headers['x-forwarded-for'];
     const remoteAddress = typeof forwardedFor === 'string' && forwardedFor.trim()
       ? forwardedFor.split(',')[0].trim()
