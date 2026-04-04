@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const { normalizeId, idsEqual, arrayIncludesId } = require('../server/utils/idHelpers');
 
 describe('idHelpers', () => {
@@ -19,5 +20,12 @@ describe('idHelpers', () => {
     expect(arrayIncludesId(participants, 'user-2')).toBe(true);
     expect(arrayIncludesId(participants, { _id: 'user-1' })).toBe(true);
     expect(arrayIncludesId(participants, 'user-3')).toBe(false);
+  });
+
+  it('normalizes mongoose ObjectId values without recursing forever', () => {
+    const objectId = new mongoose.Types.ObjectId();
+
+    expect(normalizeId(objectId)).toBe(objectId.toHexString());
+    expect(idsEqual(objectId, objectId.toHexString())).toBe(true);
   });
 });
