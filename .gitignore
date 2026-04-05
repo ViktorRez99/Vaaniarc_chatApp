@@ -2,6 +2,9 @@ node_modules/
 client/node_modules/
 dist/
 client/dist/
+build/
+client/build/
+plans/
 .vercel/
 *.tgz
 *.log
@@ -12,6 +15,14 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 client/.env
 client/.env.*
 !client/.env.example
+client/.env.local
+client/.env.development.local
+client/.env.test.local
+client/.env.production.local
