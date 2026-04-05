@@ -31,6 +31,14 @@ const deviceSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  cryptoProfile: {
+    type: mongoose.Schema.Types.Mixed,
+    default: () => ({})
+  },
+  coldPathMaterialHash: {
+    type: String,
+    default: null
+  },
   keyBundleVersion: {
     type: Number,
     default: 1
@@ -62,6 +70,10 @@ const deviceSchema = new mongoose.Schema({
         default: null
       },
       signature: {
+        type: String,
+        default: null
+      },
+      pqSignature: {
         type: String,
         default: null
       },

@@ -19,7 +19,7 @@ router.post('/setup', authenticateToken, requireCsrf, async (req, res) => {
 
     const user = await User.findById(userId);
     const secret = speakeasy.generateSecret({
-      name: `VaaniArc (${user?.email || userId})`,
+      name: `VaaniArc (@${user?.username || userId})`,
       length: 20
     });
 

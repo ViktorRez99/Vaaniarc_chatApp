@@ -34,7 +34,6 @@ const socketAuth = async (socket, next) => {
 
     socket.userId = authContext.user._id.toString();
     socket.username = authContext.user.username;
-    socket.email = authContext.user.email;
     socket.user = authContext.user;
     socket.session = authContext.session;
     socket.deviceId = authContext.session.deviceId || null;

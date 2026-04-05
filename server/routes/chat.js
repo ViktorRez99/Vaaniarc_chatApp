@@ -720,14 +720,11 @@ router.get('/users', async (req, res) => {
     };
 
     if (search) {
-      query.$or = [
-        { username: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
-      ];
+      query.username = { $regex: search, $options: 'i' };
     }
 
     const users = await User.find(query)
-      .select('username email avatar status bio')
+      .select('username avatar status bio')
       .limit(50);
 
     res.json(users);
@@ -745,7 +742,7 @@ router.get('/users/:userId', async (req, res) => {
       `user-profile:${userId}`,
       30000,
       async () => User.findById(userId)
-        .select('username email avatar status bio joinedAt lastSeen')
+        .select('username avatar status bio joinedAt lastSeen')
         .lean()
     );
 

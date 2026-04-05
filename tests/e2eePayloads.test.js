@@ -112,4 +112,51 @@ describe('e2eePayloads', () => {
       error: expect.stringMatching(/protocol version 2 or newer/i)
     });
   });
+
+  it('requires ratchet metadata for direct-session v4 payloads', () => {
+    expect(validateDeviceBoundPayload({
+      encryptedContent: JSON.stringify({
+        version: 4,
+        senderDeviceId: 'device-1',
+        envelopes: [
+          {
+            deviceId: 'device-1',
+            mode: 'session',
+            counter: 0,
+            nonce: 'nonce',
+            ciphertext: 'ciphertext'
+          }
+        ]
+      }),
+      authenticatedDeviceId: 'device-1',
+      requireSelfEnvelope: true
+    })).toMatchObject({
+      isValid: false,
+      error: expect.stringMatching(/ratchet metadata/i)
+    });
+
+    expect(validateDeviceBoundPayload({
+      encryptedContent: JSON.stringify({
+        version: 4,
+        senderDeviceId: 'device-1',
+        envelopes: [
+          {
+            deviceId: 'device-1',
+            mode: 'session',
+            counter: 0,
+            nonce: 'nonce',
+            ciphertext: 'ciphertext',
+            ratchet: {
+              ciphertext: 'wrapped-secret',
+              commitment: 'commitment'
+            }
+          }
+        ]
+      }),
+      authenticatedDeviceId: 'device-1',
+      requireSelfEnvelope: true
+    })).toMatchObject({
+      isValid: true
+    });
+  });
 });

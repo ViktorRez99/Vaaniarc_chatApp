@@ -91,6 +91,17 @@ const sleep = (durationMs) => new Promise((resolve) => {
   setTimeout(resolve, durationMs);
 });
 
+const synchronizeDatabaseIndexes = async () => {
+  const User = require('../models/User');
+  try {
+    await User.ensureOptionalEmailIndex();
+  } catch (error) {
+    logger.warn('Skipping optional email index synchronization', {
+      message: error.message
+    });
+  }
+};
+
 const connectToDatabase = async () => {
   if (mongoose.connection.readyState === 1) {
     return mongoose.connection;
@@ -105,7 +116,8 @@ const connectToDatabase = async () => {
   databaseState.sanitizedUri = sanitizeMongoUri(mongoUri);
 
   databaseState.connectPromise = mongoose.connect(mongoUri, getMongoOptions())
-    .then(() => {
+    .then(async () => {
+      await synchronizeDatabaseIndexes();
       databaseState.connectPromise = null;
       return mongoose.connection;
     })

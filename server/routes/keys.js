@@ -2,13 +2,70 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 const Device = require('../models/Device');
+const DeviceKeyMaterial = require('../models/DeviceKeyMaterial');
 const authenticateToken = require('../middleware/auth');
 const {
   appendTransparencyEntry,
   getTransparencyLogForUser
 } = require('../services/keyTransparencyService');
 const { buildTransparencyBundleHash } = require('../utils/keyTransparency');
+const {
+  buildCryptoProfileHash,
+  buildColdPathMaterialHash,
+  extractColdPathKeyMaterial,
+  mergeHotAndColdKeyBundle,
+  normalizeCryptoProfile,
+  stripColdPathKeyMaterial
+} = require('../utils/cryptoProfile');
 const requireCsrf = authenticateToken.requireCsrf;
+
+const buildDeviceKeyMaterialMap = async (devices = []) => {
+  if (!devices.length) {
+    return new Map();
+  }
+
+  const deviceIds = devices
+    .map((device) => device.deviceId)
+    .filter((deviceId) => typeof deviceId === 'string' && deviceId.trim().length > 0);
+  const userId = devices[0]?.user;
+
+  if (!userId || !deviceIds.length) {
+    return new Map();
+  }
+
+  const materials = await DeviceKeyMaterial.find({
+    user: userId,
+    deviceId: { $in: deviceIds }
+  }).lean();
+
+  return new Map(
+    materials.map((material) => [material.deviceId, material])
+  );
+};
+
+const serializeDeviceRecord = (device, materialMap = new Map()) => {
+  const deviceObject = typeof device?.toObject === 'function'
+    ? device.toObject()
+    : device;
+  const material = materialMap.get(deviceObject.deviceId);
+
+  return {
+    deviceId: deviceObject.deviceId,
+    deviceName: deviceObject.deviceName,
+    browser: deviceObject.browser,
+    platform: deviceObject.platform,
+    keyBundleVersion: deviceObject.keyBundleVersion || 2,
+    cryptoProfile: deviceObject.cryptoProfile || null,
+    coldPathMaterialHash: deviceObject.coldPathMaterialHash || null,
+    keyBundle: mergeHotAndColdKeyBundle(
+      deviceObject.keyBundle,
+      material?.coldPathMaterial || null
+    ),
+    publicKeyFingerprint: deviceObject.publicKeyFingerprint,
+    lastActive: deviceObject.lastActive,
+    linkedAt: deviceObject.linkedAt
+  };
+};
 
 router.post('/identity', authenticateToken, requireCsrf, async (req, res) => {
   try {
@@ -131,8 +188,14 @@ router.post('/devices/register', authenticateToken, requireCsrf, async (req, res
       return res.status(400).json({ message: 'A signed prekey is required for device encryption.' });
     }
 
-    const existingDevice = await Device.findOne({ user: userId, deviceId }).select('keyBundle keyBundleVersion revokedAt');
+    const existingDevice = await Device.findOne({ user: userId, deviceId }).select(
+      'keyBundle keyBundleVersion revokedAt cryptoProfile coldPathMaterialHash'
+    );
     const now = new Date();
+    const cryptoProfile = normalizeCryptoProfile(keyBundle?.cryptoProfile || {});
+    const coldPathMaterial = extractColdPathKeyMaterial(keyBundle);
+    const coldPathMaterialHash = buildColdPathMaterialHash(coldPathMaterial);
+    const hotKeyBundle = stripColdPathKeyMaterial(keyBundle || {});
     const oneTimePreKeys = Array.isArray(keyBundle?.oneTimePreKeys)
       ? keyBundle.oneTimePreKeys
         .filter((preKey) => preKey?.id && preKey?.publicKey)
@@ -144,22 +207,25 @@ router.post('/devices/register', authenticateToken, requireCsrf, async (req, res
       : [];
     const update = {
       user: userId,
-      keyBundleVersion: Number(keyBundle.version || 2),
+      keyBundleVersion: Number(hotKeyBundle.version || keyBundle.version || 2),
+      cryptoProfile,
+      coldPathMaterialHash,
       keyBundle: {
-        algorithm: keyBundle.algorithm || 'sealed_box_v2',
-        encryptionPublicKey: keyBundle.encryptionPublicKey,
-        signingPublicKey: keyBundle.signingPublicKey,
-        fingerprint: keyBundle.fingerprint,
+        algorithm: hotKeyBundle.algorithm || 'sealed_box_v2',
+        encryptionPublicKey: hotKeyBundle.encryptionPublicKey,
+        signingPublicKey: hotKeyBundle.signingPublicKey,
+        fingerprint: hotKeyBundle.fingerprint,
         signedPreKey: {
-          id: String(keyBundle.signedPreKey.id),
-          publicKey: keyBundle.signedPreKey.publicKey,
-          signature: keyBundle.signedPreKey.signature,
+          id: String(hotKeyBundle.signedPreKey.id),
+          publicKey: hotKeyBundle.signedPreKey.publicKey,
+          signature: hotKeyBundle.signedPreKey.signature,
+          pqSignature: hotKeyBundle.signedPreKey.pqSignature || null,
           publishedAt: now
         },
         oneTimePreKeys,
         publishedAt: now
       },
-      publicKeyFingerprint: keyBundle.fingerprint,
+      publicKeyFingerprint: hotKeyBundle.fingerprint,
       identityStatus: 'ready',
       lastActive: now,
       revokedAt: null
@@ -180,26 +246,60 @@ router.post('/devices/register', authenticateToken, requireCsrf, async (req, res
       }
     ).select('-__v');
 
+    if (coldPathMaterial) {
+      await DeviceKeyMaterial.findOneAndUpdate(
+        { user: userId, deviceId },
+        {
+          $set: {
+            user: userId,
+            deviceId,
+            keyBundleVersion: update.keyBundleVersion,
+            cryptoProfile,
+            coldPathMaterial,
+            materialHash: coldPathMaterialHash,
+            publishedAt: now
+          }
+        },
+        {
+          upsert: true,
+          new: true
+        }
+      );
+    } else {
+      await DeviceKeyMaterial.findOneAndDelete({ user: userId, deviceId });
+    }
+
     const previousBundleHash = existingDevice?.keyBundle
       ? buildTransparencyBundleHash(existingDevice.keyBundle, existingDevice.keyBundleVersion || 2)
       : null;
     const nextBundleHash = buildTransparencyBundleHash(update.keyBundle, update.keyBundleVersion || 2);
+    const previousCryptoProfileHash = buildCryptoProfileHash(existingDevice?.cryptoProfile || {});
+    const nextCryptoProfileHash = buildCryptoProfileHash(cryptoProfile);
 
-    if (previousBundleHash !== nextBundleHash || existingDevice?.revokedAt) {
+    if (
+      previousBundleHash !== nextBundleHash
+      || previousCryptoProfileHash !== nextCryptoProfileHash
+      || (existingDevice?.coldPathMaterialHash || null) !== coldPathMaterialHash
+      || existingDevice?.revokedAt
+    ) {
       await appendTransparencyEntry({
         userId,
         deviceId,
         action: previousBundleHash ? 'rotate' : 'publish',
         keyBundle: update.keyBundle,
         keyBundleVersion: update.keyBundleVersion,
+        cryptoProfile,
+        coldPathMaterial,
         fingerprint: update.publicKeyFingerprint,
         occurredAt: now
       });
     }
 
+    const materialMap = await buildDeviceKeyMaterialMap([device]);
+
     res.status(201).json({
       message: 'Device key bundle stored successfully',
-      device
+      device: serializeDeviceRecord(device, materialMap)
     });
   } catch (error) {
     console.error('Device key bundle storage error:', error);
@@ -222,19 +322,10 @@ router.get('/devices/:userId', authenticateToken, async (req, res) => {
     if (!devices.length) {
       return res.status(404).json({ message: 'No active device bundles found for this user' });
     }
+    const materialMap = await buildDeviceKeyMaterialMap(devices);
 
     res.json({
-      devices: devices.map((device) => ({
-        deviceId: device.deviceId,
-        deviceName: device.deviceName,
-        browser: device.browser,
-        platform: device.platform,
-        keyBundleVersion: device.keyBundleVersion || 2,
-        keyBundle: device.keyBundle,
-        publicKeyFingerprint: device.publicKeyFingerprint,
-        lastActive: device.lastActive,
-        linkedAt: device.linkedAt
-      }))
+      devices: devices.map((device) => serializeDeviceRecord(device, materialMap))
     });
   } catch (error) {
     console.error('Device key bundles fetch error:', error);
@@ -264,25 +355,49 @@ router.post('/devices/consume-prekey', authenticateToken, requireCsrf, async (re
     const oneTimePreKey = Array.isArray(device.keyBundle?.oneTimePreKeys) && device.keyBundle.oneTimePreKeys.length
       ? device.keyBundle.oneTimePreKeys.shift()
       : null;
+    const materialRecord = await DeviceKeyMaterial.findOne({ user: userId, deviceId });
+    const postQuantumOneTimePreKey = Array.isArray(materialRecord?.coldPathMaterial?.auxiliaryBundles?.postQuantum?.kem?.oneTimePreKeys)
+      && materialRecord.coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys.length
+      ? materialRecord.coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys.shift()
+      : null;
 
     if (oneTimePreKey) {
       await device.save();
     }
 
+    if (postQuantumOneTimePreKey && materialRecord) {
+      materialRecord.markModified('coldPathMaterial');
+      await materialRecord.save();
+    }
+
+    const materialMap = await buildDeviceKeyMaterialMap([device]);
+
+    const serializedDevice = serializeDeviceRecord(device, materialMap);
+    const serializedPostQuantumKem = serializedDevice.keyBundle?.auxiliaryBundles?.postQuantum?.kem || null;
+
     res.json({
       device: {
-        deviceId: device.deviceId,
-        deviceName: device.deviceName,
-        browser: device.browser,
-        platform: device.platform,
-        keyBundleVersion: device.keyBundleVersion || 2,
+        ...serializedDevice,
         keyBundle: {
-          ...(typeof device.keyBundle?.toObject === 'function' ? device.keyBundle.toObject() : device.keyBundle),
-          oneTimePreKeys: oneTimePreKey ? [oneTimePreKey] : []
-        },
-        publicKeyFingerprint: device.publicKeyFingerprint,
-        lastActive: device.lastActive,
-        linkedAt: device.linkedAt
+          ...serializedDevice.keyBundle,
+          oneTimePreKeys: oneTimePreKey ? [oneTimePreKey] : [],
+          auxiliaryBundles: serializedDevice.keyBundle?.auxiliaryBundles
+            ? {
+                ...serializedDevice.keyBundle.auxiliaryBundles,
+                postQuantum: serializedDevice.keyBundle.auxiliaryBundles.postQuantum
+                  ? {
+                      ...serializedDevice.keyBundle.auxiliaryBundles.postQuantum,
+                      kem: serializedPostQuantumKem
+                        ? {
+                            ...serializedPostQuantumKem,
+                            oneTimePreKeys: postQuantumOneTimePreKey ? [postQuantumOneTimePreKey] : []
+                          }
+                        : null
+                    }
+                  : null
+              }
+            : null
+        }
       }
     });
   } catch (error) {

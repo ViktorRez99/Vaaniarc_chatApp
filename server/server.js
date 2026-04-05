@@ -997,7 +997,7 @@ app.use('/api', authenticateToken, requireCsrf, chatRoutes);
 app.use('/api', authenticateToken, requireCsrf, roomRoutes);
 app.use('/api', authenticateToken, requireCsrf, meetingRoutes);
 
-app.use('/api/*', notFoundHandler);
+app.use(/^\/api(?:\/.*)?$/, notFoundHandler);
 app.use(errorHandler);
 
 app.get('/', (req, res) => {

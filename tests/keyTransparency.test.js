@@ -1,6 +1,8 @@
 const {
   buildTransparencyBundleHash,
+  buildTransparencyCheckpoint,
   buildTransparencyEntryHash,
+  buildTransparencyLogRoot,
   buildTransparencyPayload,
   verifyTransparencyChain
 } = require('../server/utils/keyTransparency');
@@ -33,6 +35,8 @@ describe('keyTransparency utilities', () => {
       action: 'publish',
       fingerprint: 'fingerprint-a',
       bundleHash: 'bundle-a',
+      cryptoProfileHash: 'profile-a',
+      coldPathMaterialHash: 'cold-a',
       keyBundleVersion: 2,
       occurredAt: '2026-04-03T00:00:00.000Z'
     });
@@ -40,12 +44,18 @@ describe('keyTransparency utilities', () => {
       previousEntryHash: null,
       payload: firstPayload
     });
+    const firstRootHash = buildTransparencyLogRoot({
+      previousRootHash: null,
+      entryHash: firstHash
+    });
     const secondPayload = buildTransparencyPayload({
       userId: 'user-1',
       deviceId: 'device-a',
       action: 'rotate',
       fingerprint: 'fingerprint-b',
       bundleHash: 'bundle-b',
+      cryptoProfileHash: 'profile-b',
+      coldPathMaterialHash: 'cold-b',
       keyBundleVersion: 2,
       occurredAt: '2026-04-04T00:00:00.000Z'
     });
@@ -53,16 +63,24 @@ describe('keyTransparency utilities', () => {
       previousEntryHash: firstHash,
       payload: secondPayload
     });
+    const secondRootHash = buildTransparencyLogRoot({
+      previousRootHash: firstRootHash,
+      entryHash: secondHash
+    });
 
     expect(verifyTransparencyChain([
       {
         ...firstPayload,
         previousEntryHash: null,
+        logIndex: 0,
+        logRootHash: firstRootHash,
         entryHash: firstHash
       },
       {
         ...secondPayload,
         previousEntryHash: firstHash,
+        logIndex: 1,
+        logRootHash: secondRootHash,
         entryHash: secondHash
       }
     ])).toBe(true);
@@ -75,6 +93,8 @@ describe('keyTransparency utilities', () => {
       action: 'publish',
       fingerprint: 'fingerprint-a',
       bundleHash: 'bundle-a',
+      cryptoProfileHash: 'profile-a',
+      coldPathMaterialHash: 'cold-a',
       keyBundleVersion: 2,
       occurredAt: '2026-04-03T00:00:00.000Z'
     });
@@ -87,8 +107,50 @@ describe('keyTransparency utilities', () => {
       {
         ...firstPayload,
         previousEntryHash: 'wrong-root',
+        logIndex: 0,
+        logRootHash: buildTransparencyLogRoot({
+          previousRootHash: null,
+          entryHash: firstHash
+        }),
         entryHash: firstHash
       }
     ])).toBe(false);
+  });
+
+  it('builds a verifiable checkpoint for the transparency log', () => {
+    const payload = buildTransparencyPayload({
+      userId: 'user-3',
+      deviceId: 'device-c',
+      action: 'publish',
+      fingerprint: 'fingerprint-c',
+      bundleHash: 'bundle-c',
+      cryptoProfileHash: 'profile-c',
+      coldPathMaterialHash: 'cold-c',
+      keyBundleVersion: 2,
+      occurredAt: '2026-04-05T00:00:00.000Z'
+    });
+    const entryHash = buildTransparencyEntryHash({
+      previousEntryHash: null,
+      payload
+    });
+    const logRootHash = buildTransparencyLogRoot({
+      previousRootHash: null,
+      entryHash
+    });
+
+    expect(buildTransparencyCheckpoint([
+      {
+        ...payload,
+        previousEntryHash: null,
+        logIndex: 0,
+        logRootHash,
+        entryHash
+      }
+    ])).toMatchObject({
+      verified: true,
+      head: entryHash,
+      rootHash: logRootHash,
+      treeSize: 1
+    });
   });
 });

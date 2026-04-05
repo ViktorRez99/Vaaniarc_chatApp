@@ -8,7 +8,7 @@ class ErrorBoundary extends React.Component {
   }
 
   static getDerivedStateFromError(error) {
-    return { hasError: true };
+    return { hasError: true, error };
   }
 
   componentDidCatch(error, errorInfo) {
@@ -37,7 +37,7 @@ class ErrorBoundary extends React.Component {
             >
               Reload Page
             </button>
-            {process.env.NODE_ENV === 'development' && this.state.errorInfo && (
+            {import.meta.env.DEV && this.state.errorInfo && (
               <details className="mt-4 text-left">
                 <summary className="cursor-pointer text-white/60 hover:text-white">Error Details</summary>
                 <pre className="mt-2 p-4 bg-black/30 rounded-lg text-xs text-red-300 overflow-auto max-h-64">

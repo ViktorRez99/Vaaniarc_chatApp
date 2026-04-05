@@ -107,7 +107,7 @@ class ApiService {
       try {
         // Try to parse as JSON
         data = responseText ? JSON.parse(responseText) : {};
-      } catch (parseError) {
+      } catch {
         console.error('Failed to parse response:', responseText?.substring(0, 200));
         if (response.status >= 200 && response.status < 300) {
           return { success: true };

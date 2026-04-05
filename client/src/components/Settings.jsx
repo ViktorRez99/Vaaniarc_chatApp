@@ -119,6 +119,7 @@ export default function Settings() {
     }
   }, [user]);
 
+  // Device refresh should follow auth state, not callback identity churn from the context tree.
   useEffect(() => {
     if (!user) {
       return;
@@ -136,6 +137,7 @@ export default function Settings() {
     };
 
     loadDevices();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   useEffect(() => {
@@ -248,7 +250,7 @@ export default function Settings() {
           setTimeout(() => setSuccess(''), 3000);
         };
         reader.readAsDataURL(file);
-      } catch (err) {
+      } catch {
         setError('Failed to upload avatar');
         setTimeout(() => setError(''), 3000);
       }
@@ -332,7 +334,7 @@ export default function Settings() {
     }
   };
 
-  const toggleNotification = async (key) => {
+  const toggleNotification = async () => {
     setPushToggleLoading(true);
     setError('');
     setSuccess('');
@@ -450,7 +452,7 @@ export default function Settings() {
       await navigator.clipboard.writeText(encryptionState.fingerprint);
       setSuccess('Device fingerprint copied.');
       setTimeout(() => setSuccess(''), 3000);
-    } catch (copyError) {
+    } catch {
       setError('Failed to copy the device fingerprint.');
     }
   };

@@ -196,16 +196,14 @@ const decryptPayload = async (userId, deviceId, encryptedPayload) => {
 };
 
 const stripIndexedDbMetadata = (record = {}, extraFields = []) => {
-  const {
-    id,
-    userId,
-    deviceId,
-    remoteUserId,
-    remoteDeviceId,
-    updatedAt,
-    encryptedPayload,
-    ...payload
-  } = record;
+  const payload = { ...record };
+  delete payload.id;
+  delete payload.userId;
+  delete payload.deviceId;
+  delete payload.remoteUserId;
+  delete payload.remoteDeviceId;
+  delete payload.updatedAt;
+  delete payload.encryptedPayload;
 
   extraFields.forEach((field) => {
     delete payload[field];
@@ -214,7 +212,7 @@ const stripIndexedDbMetadata = (record = {}, extraFields = []) => {
   return payload;
 };
 
-const loadProtectedRecord = async (storeName, id, userId, deviceId) => {
+const _loadProtectedRecord = async (storeName, id, userId, deviceId) => {
   const record = await loadRawRecord(storeName, id);
 
   if (!record) {

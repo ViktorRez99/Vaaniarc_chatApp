@@ -9,6 +9,7 @@ const LandingPage = () => {
   const [activeFeature, setActiveFeature] = useState(0);
   const [showDemoModal, setShowDemoModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false); // Add state for mobile sidebar toggle
+  const featureCount = 4;
 
   useEffect(() => {
     const handleScroll = () => {
@@ -22,10 +23,10 @@ const LandingPage = () => {
   // Auto-rotate through features
   useEffect(() => {
     const interval = setInterval(() => {
-      setActiveFeature((prev) => (prev + 1) % features.length);
+      setActiveFeature((prev) => (prev + 1) % featureCount);
     }, 4000);
     return () => clearInterval(interval);
-  }, []);
+  }, [featureCount]);
 
   const handleDemo = async () => {
     try {

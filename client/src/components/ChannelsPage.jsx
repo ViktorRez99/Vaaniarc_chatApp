@@ -74,6 +74,7 @@ const ChannelsPage = () => {
     selectedChannelRef.current = selectedChannel;
   }, [selectedChannel]);
 
+  // Register the page-level socket listeners once against the shared socket service.
   useEffect(() => {
     void loadBroadcastData();
     setupSocketListeners();
@@ -101,6 +102,7 @@ const ChannelsPage = () => {
       window.removeEventListener('vaaniarc:open-channel-creator', openChannelCreator);
       window.removeEventListener('vaaniarc:open-community-creator', openCommunityCreator);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

@@ -58,7 +58,7 @@ const getPushStatus = async () => {
   try {
     const config = await api.getNotificationConfig();
     serverConfigured = Boolean(config?.supported && config?.vapidPublicKey);
-  } catch (error) {
+  } catch {
     serverConfigured = false;
   }
 

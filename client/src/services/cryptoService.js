@@ -4,6 +4,22 @@ import { getOrCreateDeviceId } from '../utils/device';
 import { normalizeId } from '../utils/identity';
 import { isExpiredMessage, markAttachmentConsumedLocally } from '../utils/messagePrivacy';
 import {
+  DEFAULT_DIRECT_SESSION_MAX_SKIP,
+  normalizeDirectSessionState,
+  registerReceivedDirectSessionCounter,
+  validateIncomingDirectSessionCounter
+} from '../utils/directSessionState';
+import {
+  decapsulatePostQuantumSharedSecret,
+  encapsulatePostQuantumSharedSecret,
+  generatePostQuantumKemKeyPair,
+  generatePostQuantumSignatureKeyPair,
+  POST_QUANTUM_KEM_ALGORITHM,
+  POST_QUANTUM_SIGNATURE_ALGORITHM,
+  signPostQuantum,
+  verifyPostQuantumSignature
+} from '../utils/postQuantumCrypto';
+import {
   loadDeviceKeyMaterial,
   saveDeviceKeyMaterial,
   loadDeviceSession,
@@ -13,15 +29,20 @@ import {
 const IDENTITY_VERSION = 1;
 const PAYLOAD_VERSION = 1;
 const DEVICE_PAYLOAD_VERSION = 2;
-const DIRECT_SESSION_PAYLOAD_VERSION = 3;
-const DEVICE_BUNDLE_VERSION = 2;
-const DEVICE_ALGORITHM = 'secretbox+sealed-box+ed25519';
-const DIRECT_SESSION_ALGORITHM = 'x3dh-chain-secretbox-v1';
+const LEGACY_DIRECT_SESSION_PAYLOAD_VERSION = 3;
+const CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION = 4;
+const DIRECT_SESSION_PAYLOAD_VERSION = 5;
+const DEVICE_BUNDLE_VERSION = 4;
+const DEVICE_ALGORITHM = 'secretbox+sealed-box+ed25519+ml-dsa-87';
+const DIRECT_SESSION_ALGORITHM = 'x3dh-ml-kem1024-hybrid-secretbox-sealed-ratchet-v3';
+const DIRECT_SESSION_RATCHET_MODE = 'sealed-box-per-message';
 const BACKUP_VERSION = 1;
 const BACKUP_ITERATIONS = 250000;
 const DEFAULT_ONE_TIME_PREKEY_COUNT = 12;
 const LOW_ONE_TIME_PREKEY_THRESHOLD = 4;
 const SIGNED_PREKEY_ROTATION_MS = 7 * 24 * 60 * 60 * 1000;
+const IMPLEMENTED_POST_QUANTUM_KEMS = [POST_QUANTUM_KEM_ALGORITHM];
+const IMPLEMENTED_POST_QUANTUM_SIGNATURES = [POST_QUANTUM_SIGNATURE_ALGORITHM];
 const ENCRYPTED_PLACEHOLDER = '[Encrypted message]';
 const ENCRYPTED_ATTACHMENT_PLACEHOLDER = '[Encrypted attachment]';
 
@@ -170,7 +191,9 @@ const withoutSignature = (payload) => {
     return payload;
   }
 
-  const { signature, ...unsignedPayload } = payload;
+  const unsignedPayload = { ...payload };
+  delete unsignedPayload.signature;
+  delete unsignedPayload.pqSignature;
   return unsignedPayload;
 };
 
@@ -200,6 +223,7 @@ const cryptoService = {
   deviceIdentity: null,
   deviceBundleCache: new Map(),
   sessionCache: new Map(),
+  directEnvelopeCache: new Map(),
   sodiumReady: null,
   publicKeyCache: new Map(),
   privateKeyCache: new Map(),
@@ -299,10 +323,110 @@ const cryptoService = {
       deviceId: device.deviceId,
       fingerprint: device.keyBundle?.fingerprint || device.publicKeyFingerprint || null,
       signingPublicKey: device.keyBundle?.signingPublicKey || null,
-      encryptionPublicKey: device.keyBundle?.encryptionPublicKey || null
+      encryptionPublicKey: device.keyBundle?.encryptionPublicKey || null,
+      postQuantumSignaturePublicKey: device.keyBundle?.auxiliaryBundles?.postQuantum?.signatures?.publicKey || null,
+      postQuantumKemSignedPreKey: device.keyBundle?.auxiliaryBundles?.postQuantum?.kem?.signedPreKey?.publicKey || null,
+      cryptoProfile: device.cryptoProfile || null
     }));
 
     return this.getFingerprintForValue(serializedDevices);
+  },
+
+  buildDeviceCryptoProfile() {
+    return {
+      version: 1,
+      initialAgreement: {
+        implemented: ['curve25519-prekey', POST_QUANTUM_KEM_ALGORITHM],
+        planned: [],
+        targetMode: 'dual-hybrid'
+      },
+      ratchet: {
+        implemented: DIRECT_SESSION_RATCHET_MODE,
+        maxSkip: DEFAULT_DIRECT_SESSION_MAX_SKIP
+      },
+      signatures: {
+        implemented: ['ed25519', POST_QUANTUM_SIGNATURE_ALGORITHM],
+        planned: []
+      },
+      transparency: {
+        mode: 'append-only-log-root-v2'
+      },
+      storage: {
+        client: 'indexeddb-aes-gcm-wrapped'
+      }
+    };
+  },
+
+  buildAuxiliaryDeviceBundles(identity) {
+    if (!identity) {
+      return null;
+    }
+
+    const pqSignatureBundle = identity.postQuantum?.signatures?.publicKey
+      ? {
+          algorithm: identity.postQuantum.signatures.algorithm || POST_QUANTUM_SIGNATURE_ALGORITHM,
+          publicKey: identity.postQuantum.signatures.publicKey
+        }
+      : null;
+    const pqKemBundle = identity.postQuantum?.kem
+      ? {
+          algorithm: identity.postQuantum.kem.algorithm || POST_QUANTUM_KEM_ALGORITHM,
+          signedPreKey: identity.postQuantum.kem.signedPreKey
+            ? {
+                id: identity.postQuantum.kem.signedPreKey.id,
+                publicKey: identity.postQuantum.kem.signedPreKey.publicKey,
+                signature: identity.postQuantum.kem.signedPreKey.signature,
+                pqSignature: identity.postQuantum.kem.signedPreKey.pqSignature || null
+              }
+            : null,
+          oneTimePreKeys: Array.isArray(identity.postQuantum.kem.oneTimePreKeys)
+            ? identity.postQuantum.kem.oneTimePreKeys.map((preKey) => ({
+              id: preKey.id,
+              publicKey: preKey.publicKey
+            }))
+            : []
+        }
+      : null;
+
+    return {
+      classical: {
+        keyAgreement: 'curve25519-prekey',
+        signing: 'ed25519',
+        encryptionPublicKey: identity.encryptionPublicKey || null,
+        signingPublicKey: identity.signingPublicKey || null
+      },
+      postQuantum: pqSignatureBundle || pqKemBundle
+        ? {
+            signatures: pqSignatureBundle,
+            kem: pqKemBundle
+          }
+        : null,
+      announcedAlgorithms: {
+        kems: IMPLEMENTED_POST_QUANTUM_KEMS,
+        signatures: IMPLEMENTED_POST_QUANTUM_SIGNATURES
+      },
+      ratchet: {
+        mode: DIRECT_SESSION_RATCHET_MODE,
+        maxSkip: DEFAULT_DIRECT_SESSION_MAX_SKIP
+      }
+    };
+  },
+
+  getPostQuantumBundle(identityOrDevice = null) {
+    const auxiliaryBundles = identityOrDevice?.auxiliaryBundles || identityOrDevice?.keyBundle?.auxiliaryBundles || null;
+    return auxiliaryBundles?.postQuantum || null;
+  },
+
+  getPostQuantumSignaturePublicKey(identityOrDevice = null) {
+    return this.getPostQuantumBundle(identityOrDevice)?.signatures?.publicKey || null;
+  },
+
+  getPostQuantumKemBundle(identityOrDevice = null) {
+    return this.getPostQuantumBundle(identityOrDevice)?.kem || null;
+  },
+
+  deviceSupportsPostQuantumHandshake(device = null) {
+    return Boolean(this.getPostQuantumKemBundle(device)?.signedPreKey?.publicKey);
   },
 
   concatByteArrays(...parts) {
@@ -333,6 +457,32 @@ const cryptoService = {
     return `${this.activeUserId || 'unknown'}:${this.getCurrentDeviceId() || 'unknown'}:${normalizeId(remoteUserId)}:${remoteDeviceId}`;
   },
 
+  deriveDirectEnvelopeCacheKey(parsedPayload, envelope) {
+    return [
+      normalizeId(parsedPayload?.senderUserId),
+      parsedPayload?.senderDeviceId || '',
+      envelope?.deviceId || '',
+      String(envelope?.counter ?? ''),
+      parsedPayload?.signature || '',
+      parsedPayload?.pqSignature || ''
+    ].join(':');
+  },
+
+  rememberDirectEnvelopePayload(cacheKey, plaintext) {
+    if (!cacheKey || !plaintext) {
+      return;
+    }
+
+    this.directEnvelopeCache.set(cacheKey, plaintext);
+
+    if (this.directEnvelopeCache.size > 128) {
+      const oldestKey = this.directEnvelopeCache.keys().next().value;
+      if (oldestKey) {
+        this.directEnvelopeCache.delete(oldestKey);
+      }
+    }
+  },
+
   async loadSessionState(remoteUserId, remoteDeviceId) {
     const cacheKey = this.deriveSessionCacheKey(remoteUserId, remoteDeviceId);
 
@@ -348,7 +498,9 @@ const cryptoService = {
     );
 
     if (session) {
-      this.sessionCache.set(cacheKey, session);
+      const normalizedSession = normalizeDirectSessionState(session);
+      this.sessionCache.set(cacheKey, normalizedSession);
+      return normalizedSession;
     }
 
     return session;
@@ -357,12 +509,14 @@ const cryptoService = {
   async persistSessionState(remoteUserId, remoteDeviceId, session) {
     const normalizedRemoteUserId = normalizeId(remoteUserId);
     const cacheKey = this.deriveSessionCacheKey(normalizedRemoteUserId, remoteDeviceId);
-    const nextSession = {
+    const nextSession = normalizeDirectSessionState({
       version: 1,
       ...session,
       remoteUserId: normalizedRemoteUserId,
       remoteDeviceId
-    };
+    });
+    const persistedSession = { ...nextSession };
+    delete persistedSession.receivedCounters;
 
     this.sessionCache.set(cacheKey, nextSession);
     await saveDeviceSession(
@@ -370,25 +524,29 @@ const cryptoService = {
       this.getCurrentDeviceId(),
       normalizedRemoteUserId,
       remoteDeviceId,
-      nextSession
+      persistedSession
     );
 
     return nextSession;
   },
 
-  async createSignedPreKey(signingPrivateKey) {
+  async createSignedPreKey(identity) {
     const sodiumInstance = await this.ensureSodiumReady();
     const preKeyPair = sodiumInstance.crypto_box_keypair();
     const signature = sodiumInstance.crypto_sign_detached(
       preKeyPair.publicKey,
-      bytesFromBase64(signingPrivateKey)
+      bytesFromBase64(identity.signingPrivateKey)
     );
+    const pqSignature = identity?.postQuantum?.signatures?.privateKey
+      ? signPostQuantum(preKeyPair.publicKey, identity.postQuantum.signatures.privateKey)
+      : null;
 
     return {
       id: buildPreKeyId('signed-prekey'),
       publicKey: base64FromBytes(preKeyPair.publicKey),
       privateKey: base64FromBytes(preKeyPair.privateKey),
       signature: base64FromBytes(signature),
+      pqSignature,
       createdAt: new Date().toISOString()
     };
   },
@@ -406,36 +564,161 @@ const cryptoService = {
     });
   },
 
-  async verifySignedPreKey(bundle) {
+  async createPostQuantumSignedPreKey(identity) {
+    const pqKeyPair = generatePostQuantumKemKeyPair();
+    const publicKeyBytes = bytesFromBase64(pqKeyPair.publicKey);
+    const sodiumInstance = await this.ensureSodiumReady();
+    const signature = sodiumInstance.crypto_sign_detached(
+      publicKeyBytes,
+      bytesFromBase64(identity.signingPrivateKey)
+    );
+    const pqSignature = identity?.postQuantum?.signatures?.privateKey
+      ? signPostQuantum(publicKeyBytes, identity.postQuantum.signatures.privateKey)
+      : null;
+
+    return {
+      id: buildPreKeyId('pq-signed-prekey'),
+      publicKey: pqKeyPair.publicKey,
+      privateKey: pqKeyPair.privateKey,
+      signature: base64FromBytes(signature),
+      pqSignature,
+      createdAt: new Date().toISOString()
+    };
+  },
+
+  async createPostQuantumOneTimePreKeys(count = DEFAULT_ONE_TIME_PREKEY_COUNT) {
+    return Array.from({ length: count }, () => {
+      const pqKeyPair = generatePostQuantumKemKeyPair();
+      return {
+        id: buildPreKeyId('pq-otk'),
+        publicKey: pqKeyPair.publicKey,
+        privateKey: pqKeyPair.privateKey
+      };
+    });
+  },
+
+  async verifySignedPreKey(bundle, signedPreKey = bundle?.keyBundle?.signedPreKey) {
     const sodiumInstance = await this.ensureSodiumReady();
     const signingPublicKey = bundle?.keyBundle?.signingPublicKey;
-    const signedPreKey = bundle?.keyBundle?.signedPreKey;
+    const pqSigningPublicKey = this.getPostQuantumSignaturePublicKey(bundle);
 
     if (!signingPublicKey || !signedPreKey?.publicKey || !signedPreKey?.signature) {
       return false;
     }
 
-    return sodiumInstance.crypto_sign_verify_detached(
+    const publicKeyBytes = bytesFromBase64(signedPreKey.publicKey);
+    const isClassicalValid = sodiumInstance.crypto_sign_verify_detached(
       bytesFromBase64(signedPreKey.signature),
-      bytesFromBase64(signedPreKey.publicKey),
+      publicKeyBytes,
       bytesFromBase64(signingPublicKey)
     );
+
+    if (!isClassicalValid) {
+      return false;
+    }
+
+    if (!pqSigningPublicKey) {
+      return true;
+    }
+
+    return Boolean(signedPreKey?.pqSignature)
+      && verifyPostQuantumSignature(signedPreKey.pqSignature, publicKeyBytes, pqSigningPublicKey);
+  },
+
+  async verifyPostQuantumSignedPreKey(bundle) {
+    const pqKemBundle = this.getPostQuantumKemBundle(bundle);
+
+    if (!pqKemBundle?.signedPreKey?.publicKey) {
+      return false;
+    }
+
+    return this.verifySignedPreKey(bundle, pqKemBundle.signedPreKey);
+  },
+
+  buildDeviceFingerprintMaterial(identity = {}) {
+    return {
+      algorithm: identity.algorithm || DEVICE_ALGORITHM,
+      encryptionPublicKey: identity.encryptionPublicKey || null,
+      signingPublicKey: identity.signingPublicKey || null,
+      postQuantumSignaturePublicKey: identity.postQuantum?.signatures?.publicKey || null,
+      postQuantumKemSignedPreKey: identity.postQuantum?.kem?.signedPreKey?.publicKey || null
+    };
+  },
+
+  async finalizeDeviceIdentity(identity = {}) {
+    const auxiliaryBundles = this.buildAuxiliaryDeviceBundles(identity);
+    const fingerprint = await this.getFingerprintForValue(
+      this.buildDeviceFingerprintMaterial(identity)
+    );
+
+    return {
+      ...identity,
+      auxiliaryBundles,
+      fingerprint
+    };
   },
 
   async ensureDevicePreKeys(identity, publishedDevices = []) {
     const currentDevice = publishedDevices.find((device) => device.deviceId === identity.deviceId);
     const publishedPreKeyCount = currentDevice?.keyBundle?.oneTimePreKeys?.length || 0;
     const hasPublishedSignedPreKey = Boolean(currentDevice?.keyBundle?.signedPreKey?.publicKey);
+    const publishedPostQuantumKem = this.getPostQuantumKemBundle(currentDevice);
+    const publishedPostQuantumPreKeyCount = publishedPostQuantumKem?.oneTimePreKeys?.length || 0;
+    const hasPublishedPostQuantumSignedPreKey = Boolean(publishedPostQuantumKem?.signedPreKey?.publicKey);
     const shouldRotateSignedPreKey = isTimestampStale(
       identity?.signedPreKey?.createdAt || currentDevice?.keyBundle?.signedPreKey?.publishedAt || null,
       SIGNED_PREKEY_ROTATION_MS
     );
+    const shouldRotatePostQuantumSignedPreKey = isTimestampStale(
+      identity?.postQuantum?.kem?.signedPreKey?.createdAt || publishedPostQuantumKem?.signedPreKey?.publishedAt || null,
+      SIGNED_PREKEY_ROTATION_MS
+    );
     let nextIdentity = identity;
+
+    if (!nextIdentity.cryptoProfile) {
+      nextIdentity = {
+        ...nextIdentity,
+        cryptoProfile: this.buildDeviceCryptoProfile()
+      };
+    }
+
+    if (!nextIdentity.postQuantum?.signatures?.publicKey || !nextIdentity.postQuantum?.signatures?.privateKey) {
+      nextIdentity = {
+        ...nextIdentity,
+        postQuantum: {
+          ...nextIdentity.postQuantum,
+          signatures: generatePostQuantumSignatureKeyPair(),
+          kem: {
+            ...(nextIdentity.postQuantum?.kem || {})
+          }
+        }
+      };
+    }
 
     if (!nextIdentity.signedPreKey?.publicKey || !nextIdentity.signedPreKey?.signature || shouldRotateSignedPreKey) {
       nextIdentity = {
         ...nextIdentity,
-        signedPreKey: await this.createSignedPreKey(nextIdentity.signingPrivateKey)
+        signedPreKey: await this.createSignedPreKey(nextIdentity)
+      };
+    }
+
+    if (
+      !nextIdentity.postQuantum?.kem?.signedPreKey?.publicKey
+      || !nextIdentity.postQuantum?.kem?.signedPreKey?.signature
+      || !nextIdentity.postQuantum?.kem?.signedPreKey?.pqSignature
+      || shouldRotatePostQuantumSignedPreKey
+    ) {
+      nextIdentity = {
+        ...nextIdentity,
+        postQuantum: {
+          ...nextIdentity.postQuantum,
+          signatures: nextIdentity.postQuantum.signatures,
+          kem: {
+            ...(nextIdentity.postQuantum?.kem || {}),
+            algorithm: POST_QUANTUM_KEM_ALGORITHM,
+            signedPreKey: await this.createPostQuantumSignedPreKey(nextIdentity)
+          }
+        }
       };
     }
 
@@ -450,7 +733,40 @@ const cryptoService = {
       };
     }
 
-    if (!hasPublishedSignedPreKey || publishedPreKeyCount < LOW_ONE_TIME_PREKEY_THRESHOLD || nextIdentity !== identity) {
+    if (
+      !Array.isArray(nextIdentity.postQuantum?.kem?.oneTimePreKeys)
+      || nextIdentity.postQuantum.kem.oneTimePreKeys.length < LOW_ONE_TIME_PREKEY_THRESHOLD
+    ) {
+      const replenishedPostQuantumOneTimePreKeys = await this.createPostQuantumOneTimePreKeys(DEFAULT_ONE_TIME_PREKEY_COUNT);
+      nextIdentity = {
+        ...nextIdentity,
+        postQuantum: {
+          ...nextIdentity.postQuantum,
+          signatures: nextIdentity.postQuantum.signatures,
+          kem: {
+            ...(nextIdentity.postQuantum?.kem || {}),
+            algorithm: POST_QUANTUM_KEM_ALGORITHM,
+            signedPreKey: nextIdentity.postQuantum?.kem?.signedPreKey || null,
+            oneTimePreKeys: [
+              ...(Array.isArray(nextIdentity.postQuantum?.kem?.oneTimePreKeys)
+                ? nextIdentity.postQuantum.kem.oneTimePreKeys
+                : []),
+              ...replenishedPostQuantumOneTimePreKeys
+            ]
+          }
+        }
+      };
+    }
+
+    nextIdentity = await this.finalizeDeviceIdentity(nextIdentity);
+
+    if (
+      !hasPublishedSignedPreKey
+      || publishedPreKeyCount < LOW_ONE_TIME_PREKEY_THRESHOLD
+      || !hasPublishedPostQuantumSignedPreKey
+      || publishedPostQuantumPreKeyCount < LOW_ONE_TIME_PREKEY_THRESHOLD
+      || nextIdentity !== identity
+    ) {
       await this.persistDeviceIdentityV2(nextIdentity.userId, nextIdentity);
     }
 
@@ -693,6 +1009,9 @@ const cryptoService = {
       algorithm: keyMaterial.algorithm || DEVICE_ALGORITHM,
       userId: normalizedUserId,
       deviceId,
+      cryptoProfile: keyMaterial.cryptoProfile || this.buildDeviceCryptoProfile(),
+      auxiliaryBundles: keyMaterial.auxiliaryBundles || this.buildAuxiliaryDeviceBundles(keyMaterial),
+      postQuantum: keyMaterial.postQuantum || null,
       fingerprint: keyMaterial.fingerprint,
       encryptionPublicKey: keyMaterial.encryptionPublicKey,
       encryptionPrivateKey: keyMaterial.encryptionPrivateKey,
@@ -710,6 +1029,9 @@ const cryptoService = {
     await saveDeviceKeyMaterial(normalizedUserId, deviceId, {
       version: identity.version || DEVICE_BUNDLE_VERSION,
       algorithm: identity.algorithm || DEVICE_ALGORITHM,
+      cryptoProfile: identity.cryptoProfile || this.buildDeviceCryptoProfile(),
+      auxiliaryBundles: identity.auxiliaryBundles || this.buildAuxiliaryDeviceBundles(identity),
+      postQuantum: identity.postQuantum || null,
       fingerprint: identity.fingerprint,
       encryptionPublicKey: identity.encryptionPublicKey,
       encryptionPrivateKey: identity.encryptionPrivateKey,
@@ -725,27 +1047,30 @@ const cryptoService = {
     const encryptionKeyPair = sodiumInstance.crypto_box_keypair();
     const signingKeyPair = sodiumInstance.crypto_sign_keypair();
     const signingPrivateKey = base64FromBytes(signingKeyPair.privateKey);
-    const signedPreKey = await this.createSignedPreKey(signingPrivateKey);
-    const oneTimePreKeys = await this.createOneTimePreKeys();
-    const fingerprint = await this.getFingerprintForValue({
-      algorithm: DEVICE_ALGORITHM,
-      encryptionPublicKey: base64FromBytes(encryptionKeyPair.publicKey),
-      signingPublicKey: base64FromBytes(signingKeyPair.publicKey)
-    });
-
-    return {
+    const postQuantumSignatures = generatePostQuantumSignatureKeyPair();
+    const identity = {
       version: DEVICE_BUNDLE_VERSION,
       algorithm: DEVICE_ALGORITHM,
       userId: normalizeId(userId),
       deviceId: this.getCurrentDeviceId(),
-      fingerprint,
+      cryptoProfile: this.buildDeviceCryptoProfile(),
       encryptionPublicKey: base64FromBytes(encryptionKeyPair.publicKey),
       encryptionPrivateKey: base64FromBytes(encryptionKeyPair.privateKey),
       signingPublicKey: base64FromBytes(signingKeyPair.publicKey),
       signingPrivateKey,
-      signedPreKey,
-      oneTimePreKeys
+      signedPreKey: null,
+      oneTimePreKeys: [],
+      postQuantum: {
+        signatures: postQuantumSignatures,
+        kem: {
+          algorithm: POST_QUANTUM_KEM_ALGORITHM,
+          signedPreKey: null,
+          oneTimePreKeys: []
+        }
+      }
     };
+
+    return this.ensureDevicePreKeys(identity, []);
   },
 
   async activateDeviceIdentityV2(userId, identity) {
@@ -755,6 +1080,9 @@ const cryptoService = {
       algorithm: identity.algorithm || DEVICE_ALGORITHM,
       userId: normalizeId(userId),
       deviceId: identity.deviceId || this.getCurrentDeviceId(),
+      cryptoProfile: identity.cryptoProfile || this.buildDeviceCryptoProfile(),
+      auxiliaryBundles: identity.auxiliaryBundles || this.buildAuxiliaryDeviceBundles(identity),
+      postQuantum: identity.postQuantum || null,
       fingerprint: identity.fingerprint,
       encryptionPublicKey: identity.encryptionPublicKey,
       encryptionPrivateKey: identity.encryptionPrivateKey,
@@ -766,18 +1094,23 @@ const cryptoService = {
   },
 
   async publishDeviceIdentityV2(userId, identity) {
+    const auxiliaryBundles = identity.auxiliaryBundles || this.buildAuxiliaryDeviceBundles(identity);
+
     await api.registerDeviceKeyBundle({
       deviceId: identity.deviceId || this.getCurrentDeviceId(),
       keyBundle: {
         version: identity.version || DEVICE_BUNDLE_VERSION,
         algorithm: identity.algorithm || DEVICE_ALGORITHM,
+        cryptoProfile: identity.cryptoProfile || this.buildDeviceCryptoProfile(),
         encryptionPublicKey: identity.encryptionPublicKey,
         signingPublicKey: identity.signingPublicKey,
         fingerprint: identity.fingerprint,
+        auxiliaryBundles,
         signedPreKey: identity.signedPreKey ? {
           id: identity.signedPreKey.id,
           publicKey: identity.signedPreKey.publicKey,
-          signature: identity.signedPreKey.signature
+          signature: identity.signedPreKey.signature,
+          pqSignature: identity.signedPreKey.pqSignature || null
         } : null,
         oneTimePreKeys: Array.isArray(identity.oneTimePreKeys)
           ? identity.oneTimePreKeys.map((preKey) => ({
@@ -968,6 +1301,7 @@ const cryptoService = {
     this.deviceIdentity = null;
     this.deviceBundleCache.clear();
     this.sessionCache.clear();
+    this.directEnvelopeCache.clear();
     this.publicKeyCache.clear();
     this.privateKeyCache.clear();
     this.setIdentityState(buildIdentityState({
@@ -1013,42 +1347,66 @@ const cryptoService = {
       const response = await api.getKeyTransparencyLog(normalizedUserId);
       const entries = Array.isArray(response?.entries) ? response.entries : [];
       let previousEntryHash = null;
+      let previousRootHash = null;
       let verifiedChain = true;
 
-      for (const entry of entries) {
+      for (const [index, entry] of entries.entries()) {
         const payload = {
           userId: normalizedUserId,
           deviceId: String(entry?.deviceId || ''),
           action: String(entry?.action || ''),
           fingerprint: entry?.fingerprint || null,
           bundleHash: entry?.bundleHash || null,
+          cryptoProfileHash: entry?.cryptoProfileHash || null,
+          coldPathMaterialHash: entry?.coldPathMaterialHash || null,
           keyBundleVersion: Number(entry?.keyBundleVersion || 2),
           occurredAt: new Date(entry?.occurredAt || new Date()).toISOString()
         };
         const expectedEntryHash = await this.getHashHexForValue(
           `${previousEntryHash || 'root'}:${stableStringify(payload)}`
         );
+        const expectedRootHash = await this.getHashHexForValue(
+          `${previousRootHash || 'root'}:${expectedEntryHash}`
+        );
+        const hasLegacyCheckpoint = entry?.logIndex == null || !entry?.logRootHash;
 
-        if (entry?.previousEntryHash !== previousEntryHash || entry?.entryHash !== expectedEntryHash) {
+        if (
+          entry?.previousEntryHash !== previousEntryHash
+          || entry?.entryHash !== expectedEntryHash
+          || (!hasLegacyCheckpoint && Number(entry?.logIndex) !== index)
+          || (!hasLegacyCheckpoint && entry?.logRootHash !== expectedRootHash)
+        ) {
           verifiedChain = false;
           break;
         }
 
         previousEntryHash = entry.entryHash;
+        previousRootHash = hasLegacyCheckpoint ? expectedRootHash : entry.logRootHash;
+      }
+
+      if (verifiedChain) {
+        const advertisedTreeSize = Number(response?.treeSize || entries.length);
+        if (advertisedTreeSize !== entries.length || (response?.rootHash || previousRootHash || null) !== (previousRootHash || null)) {
+          verifiedChain = false;
+        }
       }
 
       return {
         status: entries.length ? (verifiedChain ? 'verified' : 'tampered') : 'missing',
         verifiedChain,
         head: response?.head || previousEntryHash || null,
-        entryCount: entries.length
+        rootHash: response?.rootHash || previousRootHash || null,
+        entryCount: entries.length,
+        treeSize: Number(response?.treeSize || entries.length)
       };
     } catch (error) {
       if (isNotFoundError(error)) {
         return {
           status: 'missing',
           head: null,
-          entryCount: 0
+          rootHash: null,
+          entryCount: 0,
+          treeSize: 0
         };
       }
 
@@ -1056,7 +1414,9 @@ const cryptoService = {
       return {
         status: 'unavailable',
         head: null,
-        entryCount: 0
+        rootHash: null,
+        entryCount: 0,
+        treeSize: 0
       };
     }
   },
@@ -1106,6 +1466,7 @@ const cryptoService = {
         deviceCount: deviceBundles.length,
         transparencyStatus: transparencyInfo.status,
         transparencyHead: transparencyInfo.head,
+        transparencyRootHash: transparencyInfo.rootHash,
         transparencyEntryCount: transparencyInfo.entryCount,
         message: deviceBundles.length
           ? `This contact changed their linked-device set since you last marked it as verified.${transparencyWarning}`
@@ -1122,6 +1483,7 @@ const cryptoService = {
         deviceCount: deviceBundles.length,
         transparencyStatus: transparencyInfo.status,
         transparencyHead: transparencyInfo.head,
+        transparencyRootHash: transparencyInfo.rootHash,
         transparencyEntryCount: transparencyInfo.entryCount,
         message: deviceBundles.length
           ? `This contact device set is verified on this device.${transparencyWarning}`
@@ -1137,6 +1499,7 @@ const cryptoService = {
       deviceCount: deviceBundles.length,
       transparencyStatus: transparencyInfo.status,
       transparencyHead: transparencyInfo.head,
+      transparencyRootHash: transparencyInfo.rootHash,
       transparencyEntryCount: transparencyInfo.entryCount,
       message: deviceBundles.length
         ? `Compare this contact device-set fingerprint before marking it as verified.${transparencyWarning}`
@@ -1242,6 +1605,9 @@ const cryptoService = {
       deviceIdentityV2: deviceIdentity ? {
         version: deviceIdentity.version || DEVICE_BUNDLE_VERSION,
         algorithm: deviceIdentity.algorithm || DEVICE_ALGORITHM,
+        cryptoProfile: deviceIdentity.cryptoProfile || this.buildDeviceCryptoProfile(),
+        auxiliaryBundles: deviceIdentity.auxiliaryBundles || null,
+        postQuantum: deviceIdentity.postQuantum || null,
         fingerprint: deviceIdentity.fingerprint,
         encryptionPublicKey: deviceIdentity.encryptionPublicKey,
         encryptionPrivateKey: deviceIdentity.encryptionPrivateKey,
@@ -1317,7 +1683,7 @@ const cryptoService = {
         backupKey,
         arrayBufferFromBase64(parsedBackup.ciphertext)
       );
-    } catch (error) {
+    } catch {
       throw new Error('Backup passphrase is incorrect or the backup file is corrupted.');
     }
 
@@ -1345,16 +1711,19 @@ const cryptoService = {
         deviceId: this.getCurrentDeviceId(),
         version: backupPayload.deviceIdentityV2.version || DEVICE_BUNDLE_VERSION,
         algorithm: backupPayload.deviceIdentityV2.algorithm || DEVICE_ALGORITHM,
+        cryptoProfile: backupPayload.deviceIdentityV2.cryptoProfile || this.buildDeviceCryptoProfile(),
+        auxiliaryBundles: backupPayload.deviceIdentityV2.auxiliaryBundles || null,
+        postQuantum: backupPayload.deviceIdentityV2.postQuantum || null,
         fingerprint: backupPayload.deviceIdentityV2.fingerprint
-          || await this.getFingerprintForValue({
-            algorithm: backupPayload.deviceIdentityV2.algorithm || DEVICE_ALGORITHM,
-            encryptionPublicKey: backupPayload.deviceIdentityV2.encryptionPublicKey,
-            signingPublicKey: backupPayload.deviceIdentityV2.signingPublicKey
-          })
+          || await this.getFingerprintForValue(this.buildDeviceFingerprintMaterial({
+            ...backupPayload.deviceIdentityV2,
+            algorithm: backupPayload.deviceIdentityV2.algorithm || DEVICE_ALGORITHM
+          }))
       };
 
-      await this.persistDeviceIdentityV2(restoredUserId, restoredDeviceIdentity);
-      await this.activateDeviceIdentityV2(restoredUserId, restoredDeviceIdentity);
+      const finalizedDeviceIdentity = await this.finalizeDeviceIdentity(restoredDeviceIdentity);
+      await this.persistDeviceIdentityV2(restoredUserId, finalizedDeviceIdentity);
+      await this.activateDeviceIdentityV2(restoredUserId, finalizedDeviceIdentity);
     }
 
     return this.ensureIdentity({ _id: restoredUserId });
@@ -1547,14 +1916,18 @@ const cryptoService = {
       throw new Error('Device signing key is unavailable on this browser.');
     }
 
+    const payloadBytes = textEncoder.encode(stableStringify(unsignedPayload));
     const signature = sodiumInstance.crypto_sign_detached(
-      textEncoder.encode(stableStringify(unsignedPayload)),
+      payloadBytes,
       bytesFromBase64(this.deviceIdentity.signingPrivateKey)
     );
 
     return {
       ...unsignedPayload,
-      signature: base64FromBytes(signature)
+      signature: base64FromBytes(signature),
+      pqSignature: this.deviceIdentity?.postQuantum?.signatures?.privateKey
+        ? signPostQuantum(payloadBytes, this.deviceIdentity.postQuantum.signatures.privateKey)
+        : null
     };
   },
 
@@ -1567,16 +1940,39 @@ const cryptoService = {
     const senderDevices = await this.fetchUserDeviceBundles(parsedPayload.senderUserId);
     const senderDevice = senderDevices.find((device) => device.deviceId === parsedPayload.senderDeviceId);
     const signingPublicKey = senderDevice?.keyBundle?.signingPublicKey;
+    const pqSigningPublicKey = this.getPostQuantumSignaturePublicKey(senderDevice);
+    const payloadVersion = Number(parsedPayload.version || parsedPayload.protocolVersion || 1);
 
     if (!signingPublicKey) {
       return false;
     }
 
-    return sodiumInstance.crypto_sign_verify_detached(
+    const payloadBytes = textEncoder.encode(stableStringify(withoutSignature(parsedPayload)));
+    const isClassicalValid = sodiumInstance.crypto_sign_verify_detached(
       bytesFromBase64(parsedPayload.signature),
-      textEncoder.encode(stableStringify(withoutSignature(parsedPayload))),
+      payloadBytes,
       bytesFromBase64(signingPublicKey)
     );
+
+    if (!isClassicalValid) {
+      return false;
+    }
+
+    if (!pqSigningPublicKey) {
+      return true;
+    }
+
+    const requiresPostQuantumSignature = payloadVersion >= DIRECT_SESSION_PAYLOAD_VERSION
+      || (
+        payloadVersion === DEVICE_PAYLOAD_VERSION
+        && String(parsedPayload?.algorithm || '').includes(POST_QUANTUM_SIGNATURE_ALGORITHM)
+      );
+
+    if (!parsedPayload?.pqSignature) {
+      return !requiresPostQuantumSignature;
+    }
+
+    return verifyPostQuantumSignature(parsedPayload.pqSignature, payloadBytes, pqSigningPublicKey);
   },
 
   async unwrapDeviceMessageKey(parsedPayload) {
@@ -1744,7 +2140,13 @@ const cryptoService = {
     }
   },
 
-  async deriveInitiatorRootKey({ remoteBundle, ephemeralPrivateKey, initiatorDeviceId, responderDeviceId }) {
+  async deriveInitiatorRootKey({
+    remoteBundle,
+    ephemeralPrivateKey,
+    initiatorDeviceId,
+    responderDeviceId,
+    postQuantumSharedSecrets = []
+  }) {
     const sodiumInstance = await this.ensureSodiumReady();
     const remoteIdentityPublicKey = bytesFromBase64(remoteBundle.keyBundle.encryptionPublicKey);
     const remoteSignedPreKeyPublicKey = bytesFromBase64(remoteBundle.keyBundle.signedPreKey.publicKey);
@@ -1776,6 +2178,9 @@ const cryptoService = {
     return this.hashBytes(
       textEncoder.encode('vaaniarc-direct-session-root'),
       ...sharedParts,
+      ...postQuantumSharedSecrets.map((secret) => (
+        secret instanceof Uint8Array ? secret : bytesFromBase64(secret)
+      )),
       textEncoder.encode(String(initiatorDeviceId)),
       textEncoder.encode(String(responderDeviceId))
     );
@@ -1787,7 +2192,8 @@ const cryptoService = {
     initiatorDeviceId,
     responderDeviceId,
     signedPreKeyPrivateKey,
-    oneTimePreKeyPrivateKey = null
+    oneTimePreKeyPrivateKey = null,
+    postQuantumSharedSecrets = []
   }) {
     const sodiumInstance = await this.ensureSodiumReady();
     const localIdentityPrivateKey = bytesFromBase64(this.deviceIdentity.encryptionPrivateKey);
@@ -1809,20 +2215,29 @@ const cryptoService = {
     return this.hashBytes(
       textEncoder.encode('vaaniarc-direct-session-root'),
       ...sharedParts,
+      ...postQuantumSharedSecrets.map((secret) => (
+        secret instanceof Uint8Array ? secret : bytesFromBase64(secret)
+      )),
       textEncoder.encode(String(initiatorDeviceId)),
       textEncoder.encode(String(responderDeviceId))
     );
   },
 
-  async buildDirectSessionState(rootKey, role, remoteUserId, remoteDeviceId) {
+  async buildDirectSessionState(
+    rootKey,
+    role,
+    remoteUserId,
+    remoteDeviceId,
+    protocolVersion = DIRECT_SESSION_PAYLOAD_VERSION
+  ) {
     const initiatorSend = await this.hashBytes(textEncoder.encode('vaaniarc-initiator-send'), rootKey);
     const initiatorRecv = await this.hashBytes(textEncoder.encode('vaaniarc-initiator-recv'), rootKey);
     const sendChainKey = role === 'initiator' ? initiatorSend : initiatorRecv;
     const recvChainKey = role === 'initiator' ? initiatorRecv : initiatorSend;
 
-    return {
+    return normalizeDirectSessionState({
       version: 1,
-      protocolVersion: DIRECT_SESSION_PAYLOAD_VERSION,
+      protocolVersion,
       role,
       remoteUserId: normalizeId(remoteUserId),
       remoteDeviceId,
@@ -1830,35 +2245,104 @@ const cryptoService = {
       recvChainKey: base64FromBytes(recvChainKey),
       sendCounter: 0,
       recvCounter: -1,
+      maxSkip: DEFAULT_DIRECT_SESSION_MAX_SKIP,
+      ratchetMode: protocolVersion >= CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION
+        ? DIRECT_SESSION_RATCHET_MODE
+        : 'counter-kdf-v1',
+      receivedCounters: [],
       establishedAt: new Date().toISOString()
-    };
+    });
   },
 
-  async deriveSessionMessageKey(seedBase64, counter) {
+  async deriveSessionMessageKey(seedBase64, counter, ratchetSecretBase64 = null) {
     const counterBytes = textEncoder.encode(String(counter));
     return this.hashBytes(
       textEncoder.encode('vaaniarc-msg-key'),
       bytesFromBase64(seedBase64),
-      counterBytes
+      counterBytes,
+      ratchetSecretBase64 ? bytesFromBase64(ratchetSecretBase64) : null
     );
   },
 
-  async encryptWithDirectSession(sessionState, plaintextBytes) {
+  async createDirectSessionRatchet(remoteDevice) {
     const sodiumInstance = await this.ensureSodiumReady();
+    const ratchetSecret = sodiumInstance.randombytes_buf(sodiumInstance.crypto_secretbox_KEYBYTES);
+    const ciphertext = sodiumInstance.crypto_box_seal(
+      ratchetSecret,
+      bytesFromBase64(remoteDevice.keyBundle.encryptionPublicKey)
+    );
+    const ratchetSecretBase64 = base64FromBytes(ratchetSecret);
+
+    return {
+      ratchetSecretBase64,
+      envelope: {
+        suite: DIRECT_SESSION_RATCHET_MODE,
+        ciphertext: base64FromBytes(ciphertext),
+        commitment: await this.getHashHexForValue(ratchetSecretBase64)
+      }
+    };
+  },
+
+  async openDirectSessionRatchet(envelope) {
+    if (!envelope?.ratchet?.ciphertext || !this.deviceIdentity?.encryptionPublicKey || !this.deviceIdentity?.encryptionPrivateKey) {
+      return null;
+    }
+
+    try {
+      const sodiumInstance = await this.ensureSodiumReady();
+      const openedSecret = sodiumInstance.crypto_box_seal_open(
+        bytesFromBase64(envelope.ratchet.ciphertext),
+        bytesFromBase64(this.deviceIdentity.encryptionPublicKey),
+        bytesFromBase64(this.deviceIdentity.encryptionPrivateKey)
+      );
+      const ratchetSecretBase64 = base64FromBytes(openedSecret);
+
+      if (envelope?.ratchet?.commitment) {
+        const computedCommitment = await this.getHashHexForValue(ratchetSecretBase64);
+        if (computedCommitment !== envelope.ratchet.commitment) {
+          return null;
+        }
+      }
+
+      return ratchetSecretBase64;
+    } catch (error) {
+      console.error('Failed to unwrap direct session ratchet secret:', error);
+      return null;
+    }
+  },
+
+  async encryptWithDirectSession(sessionState, plaintextBytes, remoteDevice = null) {
+    const sodiumInstance = await this.ensureSodiumReady();
+    const normalizedState = normalizeDirectSessionState(sessionState);
+    let ratchet = null;
+    let ratchetSecretBase64 = null;
+
+    if (normalizedState.protocolVersion >= CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION) {
+      if (!remoteDevice?.keyBundle?.encryptionPublicKey) {
+        throw new Error('Recipient device cannot accept direct-session ratchet updates.');
+      }
+
+      const ratchetPayload = await this.createDirectSessionRatchet(remoteDevice);
+      ratchet = ratchetPayload.envelope;
+      ratchetSecretBase64 = ratchetPayload.ratchetSecretBase64;
+    }
+
     const messageKey = await this.deriveSessionMessageKey(
-      sessionState.sendChainKey,
-      sessionState.sendCounter
+      normalizedState.sendChainKey,
+      normalizedState.sendCounter,
+      ratchetSecretBase64
     );
     const nonce = sodiumInstance.randombytes_buf(sodiumInstance.crypto_secretbox_NONCEBYTES);
     const ciphertext = sodiumInstance.crypto_secretbox_easy(plaintextBytes, nonce, messageKey);
 
     return {
-      counter: sessionState.sendCounter,
+      counter: normalizedState.sendCounter,
       nonce: base64FromBytes(nonce),
       ciphertext: base64FromBytes(ciphertext),
+      ratchet,
       nextSessionState: {
-        ...sessionState,
-        sendCounter: sessionState.sendCounter + 1
+        ...normalizedState,
+        sendCounter: normalizedState.sendCounter + 1
       }
     };
   },
@@ -1866,11 +2350,28 @@ const cryptoService = {
   async decryptWithDirectSession(sessionState, envelope) {
     const sodiumInstance = await this.ensureSodiumReady();
     const targetCounter = Number(envelope?.counter);
+    const validation = validateIncomingDirectSessionCounter(sessionState, targetCounter);
 
-    if (!Number.isFinite(targetCounter) || targetCounter < 0) {
+    if (!validation.isValid) {
+      if (validation.error) {
+        console.error(validation.error);
+      }
       return null;
     }
-    const messageKey = await this.deriveSessionMessageKey(sessionState.recvChainKey, targetCounter);
+
+    let ratchetSecretBase64 = null;
+    if (validation.normalizedState.protocolVersion >= CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION || envelope?.ratchet) {
+      ratchetSecretBase64 = await this.openDirectSessionRatchet(envelope);
+      if (!ratchetSecretBase64) {
+        return null;
+      }
+    }
+
+    const messageKey = await this.deriveSessionMessageKey(
+      validation.normalizedState.recvChainKey,
+      targetCounter,
+      ratchetSecretBase64
+    );
 
     try {
       const plaintext = sodiumInstance.crypto_secretbox_open_easy(
@@ -1881,10 +2382,10 @@ const cryptoService = {
 
       return {
         plaintext,
-        nextSessionState: {
-          ...sessionState,
-          recvCounter: Math.max(Number(sessionState.recvCounter || -1), targetCounter)
-        }
+        nextSessionState: registerReceivedDirectSessionCounter(
+          validation.normalizedState,
+          targetCounter
+        )
       };
     } catch (error) {
       console.error('Failed to decrypt session envelope:', error);
@@ -1892,17 +2393,30 @@ const cryptoService = {
     }
   },
 
-  async consumeLocalOneTimePreKey(preKeyId) {
-    if (!preKeyId || !this.deviceIdentity) {
+  async consumeLocalOneTimePreKey(preKeyId, postQuantumPreKeyId = null) {
+    if ((!preKeyId && !postQuantumPreKeyId) || !this.deviceIdentity) {
       return;
     }
 
     const remainingPreKeys = (this.deviceIdentity.oneTimePreKeys || []).filter(
-      (preKey) => preKey.id !== preKeyId
+      (preKey) => !preKeyId || preKey.id !== preKeyId
+    );
+    const remainingPostQuantumPreKeys = (this.deviceIdentity.postQuantum?.kem?.oneTimePreKeys || []).filter(
+      (preKey) => !postQuantumPreKeyId || preKey.id !== postQuantumPreKeyId
     );
     let nextIdentity = {
       ...this.deviceIdentity,
-      oneTimePreKeys: remainingPreKeys
+      oneTimePreKeys: remainingPreKeys,
+      postQuantum: {
+        ...(this.deviceIdentity.postQuantum || {}),
+        signatures: this.deviceIdentity.postQuantum?.signatures || null,
+        kem: {
+          ...(this.deviceIdentity.postQuantum?.kem || {}),
+          algorithm: this.deviceIdentity.postQuantum?.kem?.algorithm || POST_QUANTUM_KEM_ALGORITHM,
+          signedPreKey: this.deviceIdentity.postQuantum?.kem?.signedPreKey || null,
+          oneTimePreKeys: remainingPostQuantumPreKeys
+        }
+      }
     };
 
     if (remainingPreKeys.length < LOW_ONE_TIME_PREKEY_THRESHOLD) {
@@ -1915,10 +2429,33 @@ const cryptoService = {
       };
     }
 
+    if (remainingPostQuantumPreKeys.length < LOW_ONE_TIME_PREKEY_THRESHOLD) {
+      nextIdentity = {
+        ...nextIdentity,
+        postQuantum: {
+          ...nextIdentity.postQuantum,
+          signatures: nextIdentity.postQuantum?.signatures || null,
+          kem: {
+            ...(nextIdentity.postQuantum?.kem || {}),
+            algorithm: POST_QUANTUM_KEM_ALGORITHM,
+            signedPreKey: nextIdentity.postQuantum?.kem?.signedPreKey || null,
+            oneTimePreKeys: [
+              ...remainingPostQuantumPreKeys,
+              ...await this.createPostQuantumOneTimePreKeys(DEFAULT_ONE_TIME_PREKEY_COUNT)
+            ]
+          }
+        }
+      };
+    }
+
+    nextIdentity = await this.finalizeDeviceIdentity(nextIdentity);
     this.deviceIdentity = nextIdentity;
     await this.persistDeviceIdentityV2(this.activeUserId, nextIdentity);
 
-    if (remainingPreKeys.length < LOW_ONE_TIME_PREKEY_THRESHOLD) {
+    if (
+      remainingPreKeys.length < LOW_ONE_TIME_PREKEY_THRESHOLD
+      || remainingPostQuantumPreKeys.length < LOW_ONE_TIME_PREKEY_THRESHOLD
+    ) {
       try {
         await this.publishDeviceIdentityV2(this.activeUserId, nextIdentity);
       } catch (publishError) {
@@ -1937,22 +2474,68 @@ const cryptoService = {
       throw new Error('Recipient device signed prekey verification failed.');
     }
 
+    const postQuantumKem = this.getPostQuantumKemBundle(remoteDevice);
+    const shouldUsePostQuantumHandshake = this.deviceSupportsPostQuantumHandshake(remoteDevice);
+
+    if (shouldUsePostQuantumHandshake) {
+      const isPostQuantumSignedPreKeyValid = await this.verifyPostQuantumSignedPreKey(remoteDevice);
+      if (!isPostQuantumSignedPreKeyValid) {
+        throw new Error('Recipient device post-quantum signed prekey verification failed.');
+      }
+    }
+
     const sodiumInstance = await this.ensureSodiumReady();
     const ephemeralKeyPair = sodiumInstance.crypto_box_keypair();
+    const postQuantumSharedSecrets = [];
+    let pqKem = null;
+
+    if (shouldUsePostQuantumHandshake) {
+      const signedPreKeyEncapsulation = encapsulatePostQuantumSharedSecret(postQuantumKem.signedPreKey.publicKey);
+      const oneTimePreKey = postQuantumKem.oneTimePreKeys?.[0] || null;
+      const oneTimePreKeyEncapsulation = oneTimePreKey?.publicKey
+        ? encapsulatePostQuantumSharedSecret(oneTimePreKey.publicKey)
+        : null;
+
+      postQuantumSharedSecrets.push(signedPreKeyEncapsulation.sharedSecret);
+
+      if (oneTimePreKeyEncapsulation?.sharedSecret) {
+        postQuantumSharedSecrets.push(oneTimePreKeyEncapsulation.sharedSecret);
+      }
+
+      pqKem = {
+        algorithm: POST_QUANTUM_KEM_ALGORITHM,
+        signedPreKeyId: postQuantumKem.signedPreKey.id,
+        signedCiphertext: signedPreKeyEncapsulation.ciphertext,
+        oneTimePreKeyId: oneTimePreKey?.id || null,
+        oneTimeCiphertext: oneTimePreKeyEncapsulation?.ciphertext || null
+      };
+    }
+
     const rootKey = await this.deriveInitiatorRootKey({
       remoteBundle: remoteDevice,
       ephemeralPrivateKey: ephemeralKeyPair.privateKey,
       initiatorDeviceId: this.getCurrentDeviceId(),
-      responderDeviceId: remoteDevice.deviceId
+      responderDeviceId: remoteDevice.deviceId,
+      postQuantumSharedSecrets
     });
-    const sessionState = await this.buildDirectSessionState(rootKey, 'initiator', remoteUserId, remoteDevice.deviceId);
+    const protocolVersion = shouldUsePostQuantumHandshake
+      ? DIRECT_SESSION_PAYLOAD_VERSION
+      : CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION;
+    const sessionState = await this.buildDirectSessionState(
+      rootKey,
+      'initiator',
+      remoteUserId,
+      remoteDevice.deviceId,
+      protocolVersion
+    );
 
     return {
       sessionState,
       preKeyInfo: {
         senderEphemeralPublicKey: base64FromBytes(ephemeralKeyPair.publicKey),
         signedPreKeyId: remoteDevice.keyBundle.signedPreKey.id,
-        oneTimePreKeyId: remoteDevice.keyBundle.oneTimePreKeys?.[0]?.id || null
+        oneTimePreKeyId: remoteDevice.keyBundle.oneTimePreKeys?.[0]?.id || null,
+        pqKem
       }
     };
   },
@@ -1977,6 +2560,43 @@ const cryptoService = {
     const oneTimePreKey = envelope?.preKey?.oneTimePreKeyId
       ? (this.deviceIdentity.oneTimePreKeys || []).find((preKey) => preKey.id === envelope.preKey.oneTimePreKeyId)
       : null;
+    const protocolVersion = Number(
+      parsedPayload.version || parsedPayload.protocolVersion || LEGACY_DIRECT_SESSION_PAYLOAD_VERSION
+    );
+    const pqKemEnvelope = envelope?.preKey?.pqKem || null;
+    const pqKemState = this.deviceIdentity?.postQuantum?.kem || null;
+    const pqSharedSecrets = [];
+    let pqOneTimePreKey = null;
+
+    if (protocolVersion >= DIRECT_SESSION_PAYLOAD_VERSION || pqKemEnvelope) {
+      if (!pqKemEnvelope?.signedCiphertext || !pqKemState?.signedPreKey?.privateKey) {
+        throw new Error('The post-quantum prekey is unavailable on this browser.');
+      }
+
+      if (pqKemState.signedPreKey.id !== pqKemEnvelope?.signedPreKeyId) {
+        throw new Error('This browser no longer has the requested post-quantum signed prekey.');
+      }
+
+      pqSharedSecrets.push(decapsulatePostQuantumSharedSecret(
+        pqKemEnvelope.signedCiphertext,
+        pqKemState.signedPreKey.privateKey
+      ));
+
+      pqOneTimePreKey = pqKemEnvelope?.oneTimePreKeyId
+        ? (pqKemState.oneTimePreKeys || []).find((preKey) => preKey.id === pqKemEnvelope.oneTimePreKeyId)
+        : null;
+
+      if (pqKemEnvelope?.oneTimePreKeyId) {
+        if (!pqOneTimePreKey?.privateKey || !pqKemEnvelope?.oneTimeCiphertext) {
+          throw new Error('The requested post-quantum one-time prekey is unavailable on this browser.');
+        }
+
+        pqSharedSecrets.push(decapsulatePostQuantumSharedSecret(
+          pqKemEnvelope.oneTimeCiphertext,
+          pqOneTimePreKey.privateKey
+        ));
+      }
+    }
 
     const rootKey = await this.deriveResponderRootKey({
       senderIdentityPublicKey: senderDevice.keyBundle.encryptionPublicKey,
@@ -1984,17 +2604,19 @@ const cryptoService = {
       initiatorDeviceId: parsedPayload.senderDeviceId,
       responderDeviceId: this.getCurrentDeviceId(),
       signedPreKeyPrivateKey: signedPreKey.privateKey,
-      oneTimePreKeyPrivateKey: oneTimePreKey?.privateKey || null
+      oneTimePreKeyPrivateKey: oneTimePreKey?.privateKey || null,
+      postQuantumSharedSecrets: pqSharedSecrets
     });
     const sessionState = await this.buildDirectSessionState(
       rootKey,
       'responder',
       parsedPayload.senderUserId,
-      parsedPayload.senderDeviceId
+      parsedPayload.senderDeviceId,
+      protocolVersion
     );
 
-    if (oneTimePreKey?.id) {
-      await this.consumeLocalOneTimePreKey(oneTimePreKey.id);
+    if (oneTimePreKey?.id || pqOneTimePreKey?.id) {
+      await this.consumeLocalOneTimePreKey(oneTimePreKey?.id || null, pqOneTimePreKey?.id || null);
     }
 
     return sessionState;
@@ -2031,6 +2653,13 @@ const cryptoService = {
     let sessionState = await this.loadSessionState(remoteUserId, remoteDevice.deviceId);
     let mode = 'session';
     let preKey = null;
+    const minimumProtocolVersion = this.deviceSupportsPostQuantumHandshake(remoteDevice)
+      ? DIRECT_SESSION_PAYLOAD_VERSION
+      : CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION;
+
+    if (sessionState?.protocolVersion < minimumProtocolVersion) {
+      sessionState = null;
+    }
 
     if (!sessionState) {
       const preKeyBundle = await this.consumeDevicePreKeyBundle(remoteUserId, remoteDevice.deviceId);
@@ -2040,13 +2669,14 @@ const cryptoService = {
       preKey = bootstrap.preKeyInfo;
     }
 
-    const encryptedEnvelope = await this.encryptWithDirectSession(sessionState, plaintextBytes);
+    const encryptedEnvelope = await this.encryptWithDirectSession(sessionState, plaintextBytes, remoteDevice);
     await this.persistSessionState(remoteUserId, remoteDevice.deviceId, encryptedEnvelope.nextSessionState);
 
     return {
       userId: normalizeId(remoteUserId),
       deviceId: remoteDevice.deviceId,
       mode,
+      protocolVersion: encryptedEnvelope.nextSessionState.protocolVersion,
       counter: encryptedEnvelope.counter,
       nonce: encryptedEnvelope.nonce,
       ciphertext: encryptedEnvelope.ciphertext,
@@ -2063,9 +2693,14 @@ const cryptoService = {
       return null;
     }
 
+    const cacheKey = this.deriveDirectEnvelopeCacheKey(parsedPayload, targetEnvelope);
+    if (cacheKey && this.directEnvelopeCache.has(cacheKey)) {
+      return this.directEnvelopeCache.get(cacheKey);
+    }
+
     let sessionState = await this.loadSessionState(parsedPayload.senderUserId, parsedPayload.senderDeviceId);
 
-    if (!sessionState && targetEnvelope.mode === 'prekey') {
+    if (targetEnvelope.mode === 'prekey') {
       sessionState = await this.initializeDirectSessionAsResponder(parsedPayload, targetEnvelope);
     }
 
@@ -2083,23 +2718,32 @@ const cryptoService = {
       parsedPayload.senderDeviceId,
       decryptedEnvelope.nextSessionState
     );
+    this.rememberDirectEnvelopePayload(cacheKey, decryptedEnvelope.plaintext);
 
     return decryptedEnvelope.plaintext;
   },
 
   async encryptTextForDirectSession(plaintext, userIds = []) {
     const targetDevices = await this.buildDirectTargetDevices(userIds);
-    const envelopes = await Promise.all(
+    const rawEnvelopes = await Promise.all(
       targetDevices.map((device) => this.buildDirectEnvelopeForDevice(
         textEncoder.encode(plaintext),
         device.userId,
         device
       ))
     );
+    const payloadVersion = rawEnvelopes.every((envelope) => envelope.protocolVersion >= DIRECT_SESSION_PAYLOAD_VERSION)
+      ? DIRECT_SESSION_PAYLOAD_VERSION
+      : CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION;
+    const envelopes = rawEnvelopes.map((envelope) => {
+      const nextEnvelope = { ...envelope };
+      delete nextEnvelope.protocolVersion;
+      return nextEnvelope;
+    });
 
     const signedPayload = await this.buildSignedPayloadV2({
-      version: DIRECT_SESSION_PAYLOAD_VERSION,
-      protocolVersion: DIRECT_SESSION_PAYLOAD_VERSION,
+      version: payloadVersion,
+      protocolVersion: payloadVersion,
       type: 'text',
       algorithm: DIRECT_SESSION_ALGORITHM,
       senderUserId: this.activeUserId,
@@ -2111,7 +2755,7 @@ const cryptoService = {
     return JSON.stringify(signedPayload);
   },
 
-  async decryptTextPayloadV3(parsedPayload) {
+  async decryptTextPayloadDirect(parsedPayload) {
     if (!await this.verifyDevicePayloadV2(parsedPayload)) {
       console.error('Failed to verify direct session payload.');
       return null;
@@ -2136,17 +2780,25 @@ const cryptoService = {
         size: file.size
       }
     }));
-    const envelopes = await Promise.all(
+    const rawEnvelopes = await Promise.all(
       targetDevices.map((device) => this.buildDirectEnvelopeForDevice(
         encryptedBundle,
         device.userId,
         device
       ))
     );
+    const payloadVersion = rawEnvelopes.every((envelope) => envelope.protocolVersion >= DIRECT_SESSION_PAYLOAD_VERSION)
+      ? DIRECT_SESSION_PAYLOAD_VERSION
+      : CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION;
+    const envelopes = rawEnvelopes.map((envelope) => {
+      const nextEnvelope = { ...envelope };
+      delete nextEnvelope.protocolVersion;
+      return nextEnvelope;
+    });
 
     const encryptionPayload = await this.buildSignedPayloadV2({
-      version: DIRECT_SESSION_PAYLOAD_VERSION,
-      protocolVersion: DIRECT_SESSION_PAYLOAD_VERSION,
+      version: payloadVersion,
+      protocolVersion: payloadVersion,
       type: 'file',
       algorithm: DIRECT_SESSION_ALGORITHM,
       senderUserId: this.activeUserId,
@@ -2212,8 +2864,8 @@ const cryptoService = {
       return null;
     }
 
-    if (Number(parsedPayload.version || parsedPayload.protocolVersion || 1) >= DIRECT_SESSION_PAYLOAD_VERSION) {
-      return this.decryptTextPayloadV3(parsedPayload);
+    if (Number(parsedPayload.version || parsedPayload.protocolVersion || 1) >= LEGACY_DIRECT_SESSION_PAYLOAD_VERSION) {
+      return this.decryptTextPayloadDirect(parsedPayload);
     }
 
     if (Number(parsedPayload.version || parsedPayload.protocolVersion || 1) >= DEVICE_PAYLOAD_VERSION) {
@@ -2278,7 +2930,7 @@ const cryptoService = {
       return null;
     }
 
-    if (Number(parsedPayload.version || parsedPayload.protocolVersion || 1) >= DIRECT_SESSION_PAYLOAD_VERSION) {
+    if (Number(parsedPayload.version || parsedPayload.protocolVersion || 1) >= LEGACY_DIRECT_SESSION_PAYLOAD_VERSION) {
       const bundle = await this.decryptDirectAttachmentBundle(parsedPayload);
       return bundle?.metadata || null;
     }
@@ -2331,7 +2983,7 @@ const cryptoService = {
       const encryptedBuffer = await response.arrayBuffer();
       let decryptedBuffer;
 
-      if (Number(payload.version || payload.protocolVersion || 1) >= DIRECT_SESSION_PAYLOAD_VERSION) {
+      if (Number(payload.version || payload.protocolVersion || 1) >= LEGACY_DIRECT_SESSION_PAYLOAD_VERSION) {
         const sodiumInstance = await this.ensureSodiumReady();
         const directBundle = await this.decryptDirectAttachmentBundle(payload);
 

@@ -2,7 +2,6 @@ import {
   Calendar,
   Clock,
   Copy,
-  Mail,
   MessageCircle,
   Phone,
   RefreshCw,
@@ -31,6 +30,7 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
     setUser(initialUser);
   }, [initialUser]);
 
+  // Refresh contact data when the viewed user changes.
   useEffect(() => {
     if (!initialUser?._id) {
       return;
@@ -38,6 +38,7 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
 
     void fetchUserDetails();
     void fetchSecurityInfo();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialUser?._id]);
 
   const showTransientMessage = (setter, message) => {
@@ -91,7 +92,7 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
     try {
       await navigator.clipboard.writeText(securityInfo.fingerprint);
       showTransientMessage(setSecuritySuccess, 'Fingerprint copied.');
-    } catch (error) {
+    } catch {
       showTransientMessage(setSecurityError, 'Failed to copy the fingerprint.');
     }
   };
@@ -274,18 +275,6 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
 
         <div className="p-6 border-b border-[#2a2f32] space-y-4">
           <h4 className="text-sm font-medium text-[#00a884] mb-3">Contact Info</h4>
-
-          {user?.email && (
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 bg-slate-800/50 rounded-full flex items-center justify-center">
-                <Mail className="w-5 h-5 text-indigo-400" />
-              </div>
-              <div>
-                <p className="text-xs text-[#8696a0]">Email</p>
-                <p className="text-[#e9edef]">{user.email}</p>
-              </div>
-            </div>
-          )}
 
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 bg-slate-800/50 rounded-full flex items-center justify-center">

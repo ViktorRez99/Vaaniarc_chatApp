@@ -159,7 +159,7 @@ const Auth = () => {
     setIsLogin(!shouldSignup)
     setStep(1)
     clearError()
-  }, [shouldSignup])
+  }, [shouldSignup, clearError])
 
   // Image cropping state
   const [imageSrc, setImageSrc] = useState(null)

@@ -4,6 +4,16 @@ const bcrypt = require('bcryptjs');
 const cacheService = require('../services/cacheService');
 const { validatePassword } = require('../utils/validation');
 
+const EMAIL_REGEX = /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/;
+const normalizeOptionalEmail = (value) => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const normalizedValue = value.trim().toLowerCase();
+  return normalizedValue || undefined;
+};
+
 const userSchema = new mongoose.Schema({
   username: {
     type: String,
@@ -15,11 +25,14 @@ const userSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-    required: true,
-    unique: true,
-    trim: true,
-    lowercase: true,
-    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
+    default: undefined,
+    set: normalizeOptionalEmail,
+    validate: {
+      validator(value) {
+        return value == null || EMAIL_REGEX.test(value);
+      },
+      message: 'Please enter a valid email'
+    }
   },
   firstName: {
     type: String,
@@ -103,7 +116,7 @@ const userSchema = new mongoose.Schema({
   timestamps: true
 });
 
-userSchema.index({ email: 1 });
+userSchema.index({ email: 1 }, { unique: true, sparse: true });
 userSchema.index({ username: 1 });
 userSchema.index({ status: 1, lastSeen: -1 });
 
@@ -294,6 +307,32 @@ userSchema.methods.toJSON = function() {
   const user = this.toObject();
   delete user.password;
   return user;
+};
+
+userSchema.statics.ensureOptionalEmailIndex = async function ensureOptionalEmailIndex() {
+  const existingIndexes = await this.collection.indexes();
+  const emailIndexes = existingIndexes.filter((index) => index.key?.email === 1);
+  const expectedEmailIndexes = emailIndexes.filter((index) => index.unique === true && index.sparse === true);
+  const preservedIndexName = expectedEmailIndexes.length === 1 ? expectedEmailIndexes[0].name : null;
+
+  for (const index of emailIndexes) {
+    if (index.name === '_id_') {
+      continue;
+    }
+
+    if (preservedIndexName && index.name === preservedIndexName) {
+      continue;
+    }
+
+    await this.collection.dropIndex(index.name);
+  }
+
+  if (!preservedIndexName) {
+    await this.collection.createIndex(
+      { email: 1 },
+      { name: 'email_1', unique: true, sparse: true }
+    );
+  }
 };
 
 module.exports = mongoose.model('User', userSchema);

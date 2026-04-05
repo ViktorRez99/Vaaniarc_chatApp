@@ -40,20 +40,25 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
     startInstantMeeting
   }));
 
+  // This fetch should follow auth state, not callback identity churn from the context tree.
   useEffect(() => {
     if (user) {
       fetchMeetings();
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
+  // Route-driven auto-join should react to route/user state only.
   useEffect(() => {
     if (meetingIdFromRoute && user && !isInMeeting) {
       joinMeeting(meetingIdFromRoute).catch((error) => {
         console.error('Error joining meeting from route:', error);
       });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meetingIdFromRoute, user, isInMeeting]);
 
+  // Meeting socket listeners are bound once for the active meeting session.
   useEffect(() => {
     if (isInMeeting && activeMeeting) {
       setupSocketListeners();
@@ -64,6 +69,7 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
       cleanupMedia();
       cleanupSocketListeners();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isInMeeting, activeMeeting]);
 
   const fetchMeetings = async () => {

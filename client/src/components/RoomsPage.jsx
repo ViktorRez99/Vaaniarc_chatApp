@@ -60,6 +60,7 @@ const RoomsPage = () => {
     selectedRoomRef.current = selectedRoom;
   }, [selectedRoom]);
 
+  // Register the page-level socket listeners once against the shared socket service.
   useEffect(() => {
     void loadRooms();
     setupSocketListeners();
@@ -71,6 +72,7 @@ const RoomsPage = () => {
       cleanupSocketListeners();
       window.removeEventListener('vaaniarc:open-group-creator', openGroupCreator);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

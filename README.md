@@ -1,281 +1,217 @@
-# VaaniArc - Real-Time Chat Application
+# VaaniArc
 
-A modern, feature-rich real-time chat application built with React, Node.js, Express, Socket.IO, and MongoDB. VaaniArc provides a seamless communication experience with support for public rooms, private messaging, video meetings, and more.
+VaaniArc is a real-time chat and collaboration application built with React, Vite, Node.js, Express, Socket.IO, and MongoDB. It supports account management, public and private messaging, rooms, meetings, device-aware encryption flows, and push-based realtime updates.
 
-## 🚀 Features
+## Workflow Diagram
 
-### Authentication & User Management
-- **Multi-step Registration**: Two-step signup process with personal details and profile customization
-- **Avatar System**: Choose from pre-generated avatars or upload custom profile pictures
-- **Image Cropping**: WhatsApp/Telegram-style image cropping with zoom controls (1:1 aspect ratio)
-- **JWT Authentication**: Secure token-based authentication
-- **Password Strength Indicator**: Real-time password strength visualization
-- **User Profiles**: Customizable profiles with bio, phone, location, and more
+```mermaid
+graph TD
+    %% Styling
+    classDef frontend fill:#61DAFB,stroke:#333,stroke-width:2px,color:#000
+    classDef backend fill:#8CC84B,stroke:#333,stroke-width:2px,color:#000
+    classDef database fill:#4DB33D,stroke:#333,stroke-width:2px,color:#fff
+    classDef realtime fill:#FF0000,stroke:#333,stroke-width:2px,color:#fff
+    classDef user fill:#FF9900,stroke:#333,stroke-width:2px,color:#000
 
-### Messaging Features
-- **Real-Time Chat**: Instant messaging powered by Socket.IO
-- **Public Rooms**: Create and join public chat rooms
-- **Private Messages**: One-on-one private conversations
-- **Message Persistence**: All messages stored in MongoDB
-- **Typing Indicators**: See when other users are typing
-- **Online Status**: Real-time user presence tracking
-- **Message History**: Full chat history with timestamps
+    U((User Devices)):::user
 
-### Video Meetings
-- **Integrated Video Calls**: Built-in video meeting functionality
-- **Meeting Scheduling**: Schedule and manage video meetings
-- **Room Management**: Create and control meeting rooms
+    subgraph "Frontend Engine (React + Vite)"
+        UI[Web UI / Tailwind]:::frontend
+        HTTP_Client[Axios/Fetch Client]:::frontend
+        WS_Client[Socket.IO Client]:::frontend
+    end
 
-### User Interface
-- **Modern Design**: Clean, intuitive interface with glassmorphism effects
-- **Responsive Layout**: Works seamlessly on desktop and mobile devices
-- **Dark Theme**: Eye-friendly dark mode throughout the application
-- **Smooth Animations**: Polished animations and transitions
-- **Real-time Notifications**: Toast notifications for important events
-- **Settings Panel**: Comprehensive user settings management
+    subgraph "Backend Engine (Node + Express)"
+        API_GW[Express Routes / API]:::backend
+        WS_Server[Socket.IO Server]:::realtime
+        SVC[Business Logic / Services]:::backend
+    end
 
-## 🛠️ Tech Stack
+    subgraph "Persistence & Delivery"
+        DB[(MongoDB)]:::database
+        PUSH[Web Push Notifications]:::backend
+    end
+
+    U <-->|Interacts| UI
+    UI <-->|RESTful Calls| HTTP_Client
+    UI <-->|Real-time Events| WS_Client
+
+    HTTP_Client <-->|HTTP/JSON| API_GW
+    WS_Client <-->|WebSocket| WS_Server
+
+    API_GW <-->|Controllers/Middleware| SVC
+    WS_Server <-->|Event Handlers| SVC
+
+    SVC <-->|Mongoose ODM| DB
+    SVC -->|Triggers| PUSH
+    PUSH -->|Alerts| U
+```
+
+## 🚀 Core & Advanced Features
+
+VaaniArc is packed with foundational and advanced features designed for seamless, scalable, and secure communication:
+
+- **Real-Time Messaging:** Instant delivery for both public rooms and direct private chats via Socket.IO.
+- **Channels & Communities:** Organize users into logical groups and broadcast channels.
+- **Meetings & Audio/Video Collaboration:** Built-in meeting interfaces for team collaboration.
+- **End-to-End Encryption (E2EE):** Secure messaging with device-aware encryption payloads and continuous key management.
+- **Key Transparency:** Advanced cryptographic guarantees making sure public keys haven't been tampered with.
+- **Advanced Authentication:** Multi-step registration flows, Two-Factor Authentication (2FA), and secure JWT session management.
+- **Multi-Device Handling:** Native support for managing active sessions and device-specific keys across multiple platforms simultaneously.
+- **File Uploads & Sharing:** Secure file transmission, access control, and size validation mechanisms.
+- **Message Reliability:** Built-in message and operation idempotency, preventing duplicate messages upon network drops, plus optimistic locking for concurrent database operations.
+- **Web Push Notifications:** Native push-based realtime alerts ensuring users are notified of events even when tab is out of focus.
+- **Security & Audit:** Robust API rate limiting, auth middleware, and continuous audit logging.
+
+## ✨ What Sets VaaniArc Apart
+
+While many chat applications offer basic messaging, VaaniArc natively integrates several advanced architectural choices often skipped by standard chat tools:
+
+- **Integrated Key Transparency System:** Unlike standard chat apps, VaaniArc verifies E2EE keys transparently without relying strictly on trust-on-first-use (TOFU), giving users cryptographically verifiable security.
+- **Native Idempotency & Optimistic Locking:** Ensures no multi-device sync collisions or duplicated deliveries during high latency or intermittent offline scenarios.
+- **Decoupled Identity System:** Full identity verification and account management without reliance on external verifiers like SMS gateways or third-party mailing networks.
+- **Device-Level Granular Security:** The system tracks not just 'User' encryption, but 'Device-Aware' keys, allowing exact revocation and secure rotations perfectly tailored per device.
+
+## 🔮 Future Roadmap (What We Are Building Next)
+
+To establish VaaniArc as a massive enterprise and production-ready system better than current market leaders, our roadmap includes advanced features that many other apps already have (like massive group calls) or will be uniquely pioneering:
+
+- **Passwordless Login (WebAuthn/Passkeys):** Shifting to FaceID/Fingerprint logins via `@simplewebauthn`. For account recovery, we will implement "Social Recovery" (Shamir's Secret Sharing) where 5 trusted friends hold key splits—requiring 3 approvals to recover access.
+- **Massive Group Calls (SFU Integration):** Standard WebRTC limits calls to 5-6 users. We are transitioning our backend to use `mediasoup` (SFU proxy) to support huge 100+ participant rooms similar to Zoom or Discord.
+- **True Offline Sync (CRDTs):** Current standard messaging can suffer overlap when reconnecting to the internet. We will use React front-end CRDTs (`Yjs` or `Automerge`) for flawless, conflict-free merging of offline edits.
+- **On-Device Translation (WASM):** Using cloud APIs compromises E2EE. Our plan includes local WebAssembly (WASM) models directly in the browser to translate chats in real-time securely on the user's device.
+- **Offline Mesh Network:** Adding Bluetooth and Wi-Fi Direct support so messages can hop through a localized offline mesh network of nearby devices when centralized internet is unavailable!
+
+## Tech Stack
 
 ### Frontend
-- **React 18.3**: Modern React with hooks and functional components
-- **Vite**: Lightning-fast build tool and dev server
-- **Tailwind CSS**: Utility-first CSS framework
-- **Radix UI**: Accessible component primitives
-- **Socket.IO Client**: Real-time bidirectional communication
-- **React Easy Crop**: Advanced image cropping functionality
-- **Lucide React**: Beautiful icon library
+
+- React
+- Vite
+- Tailwind CSS
+- Socket.IO Client
+- Radix UI
 
 ### Backend
-- **Node.js**: JavaScript runtime
-- **Express.js**: Web application framework
-- **MongoDB**: NoSQL database with Mongoose ODM
-- **Socket.IO**: Real-time engine
-- **JWT**: JSON Web Token authentication
-- **Bcrypt**: Password hashing
-- **Multer**: File upload handling
-- **Express Rate Limit**: API rate limiting
-- **Helmet**: Security headers
 
-## 📦 Installation
+- Node.js
+- Express
+- Socket.IO
+- MongoDB with Mongoose
+- JWT and session security middleware
+- Web Push
+
+## Quick Start
 
 ### Prerequisites
-- Node.js >= 18.0.0
-- MongoDB database (local or cloud)
-- npm >= 8.0.0
 
-### Setup Instructions
+- Node.js 18+
+- npm 8+
+- MongoDB local instance or MongoDB Atlas
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/ViktorRez99/Vaaniarc_chatApp.git
-   cd Vaaniarc_chatApp
-   ```
+### Install
 
-2. **Install dependencies**
-   ```bash
-   npm run setup
-   ```
-   This will install both server and client dependencies.
-
-3. **Environment Configuration**
-   
-   Create a `.env` file in the root directory:
-   ```env
-   # Server Configuration
-   PORT=5000
-   NODE_ENV=development
-
-   # MongoDB
-   MONGODB_URI=your_mongodb_connection_string
-
-   # JWT Configuration
-   JWT_SECRET=your_super_secret_jwt_key
-   JWT_EXPIRES_IN=7d
-
-   # CORS
-   CLIENT_URL=http://localhost:5173
-
-   # File Upload
-   MAX_FILE_SIZE=5242880
-   ```
-
-4. **Start Development Servers**
-   
-   Run both frontend and backend concurrently:
-   ```bash
-   npm run dev:full
-   ```
-
-   Or run them separately:
-   ```bash
-   # Terminal 1 - Backend
-   npm run dev
-
-   # Terminal 2 - Frontend
-   npm run client
-   ```
-
-5. **Access the Application**
-   - Frontend: http://localhost:5173
-   - Backend: http://localhost:5000
-
-## 📁 Project Structure
-
+```bash
+git clone https://github.com/ViktorRez99/Vaaniarc_chatApp.git
+cd Vaaniarc_chatApp
+npm run setup
 ```
+
+### Environment
+
+Create a root `.env` file:
+
+```env
+PORT=3000
+NODE_ENV=development
+CLIENT_URL=http://127.0.0.1:5173
+MONGODB_URI=mongodb://127.0.0.1:27017/chatapp
+JWT_SECRET=replace_this_with_a_strong_secret
+JWT_EXPIRES_IN=7d
+MAX_FILE_SIZE=5242880
+```
+
+### Run in Development
+
+```bash
+npm run dev:full
+```
+
+`dev:full` starts backend and frontend together. If port `3000` is already busy, the launcher will select the next available backend port automatically.
+
+Default local URLs:
+
+- Frontend: `http://127.0.0.1:5173`
+- Backend: `http://127.0.0.1:3000`
+
+## Project Structure
+
+```text
 vaaniArc/
-├── client/                 # React frontend
-│   ├── public/            # Static assets
-│   ├── src/
-│   │   ├── components/    # React components
-│   │   │   ├── Auth.jsx           # Authentication UI
-│   │   │   ├── ChatHub.jsx        # Main chat interface
-│   │   │   ├── ChatsPage.jsx      # Chat list
-│   │   │   ├── LandingPage.jsx    # Landing page
-│   │   │   ├── MeetingsPage.jsx   # Video meetings
-│   │   │   ├── Settings.jsx       # User settings
-│   │   │   └── UserProfile.jsx    # Profile management
-│   │   ├── context/       # React Context providers
-│   │   │   └── AuthContext.jsx    # Authentication context
-│   │   ├── services/      # API & Socket services
-│   │   │   ├── api.js             # HTTP API client
-│   │   │   └── socket.js          # Socket.IO client
-│   │   ├── utils/         # Utility functions
-│   │   │   └── cropImage.js       # Image cropping utility
-│   │   ├── assets/        # Styles and animations
-│   │   ├── App.jsx        # Main App component
-│   │   └── main.jsx       # Application entry point
-│   └── package.json
-├── middleware/            # Express middlewares
-│   ├── auth.js           # JWT authentication
-│   ├── errorHandler.js   # Error handling
-│   └── socketAuth.js     # Socket authentication
-├── models/               # MongoDB schemas
-│   ├── User.js          # User model
-│   ├── Chat.js          # Chat room model
-│   ├── Message.js       # Message model
-│   ├── PrivateMessage.js # Private message model
-│   ├── Room.js          # Room model
-│   └── Meeting.js       # Meeting model
-├── routes/              # API routes
-│   ├── auth.js         # Authentication routes
-│   ├── chat.js         # Chat routes
-│   ├── room.js         # Room management
-│   ├── meeting.js      # Meeting routes
-│   └── upload.js       # File upload routes
-├── utils/              # Server utilities
-│   ├── fileHelpers.js # File handling
-│   └── validation.js  # Input validation
-├── server.js          # Express server & Socket.IO
-├── package.json       # Server dependencies
-└── README.md         # Project documentation
+|- client/
+|  |- src/
+|  |  |- components/
+|  |  |- context/
+|  |  |- services/
+|  |  |- utils/
+|  |  |- App.jsx
+|  |  `- main.jsx
+|  `- package.json
+|- server/
+|  |- middleware/
+|  |- models/
+|  |- routes/
+|  |- services/
+|  |- utils/
+|  |- entry.js
+|  `- server.js
+|- tests/
+|- package.json
+`- README.md
 ```
 
-## 🔑 Key Features Explained
+## Key Runtime Flow
 
-### Image Upload & Cropping
-Users can upload custom profile pictures with built-in cropping functionality:
-- 1:1 aspect ratio enforcement (square images)
-- Zoom controls for precise cropping
-- Real-time preview
-- Base64 image encoding for storage
+1. Users authenticate from the React frontend.
+2. The frontend sends REST requests for auth, profile, chat, room, upload, and device actions.
+3. The backend validates requests and persists data in MongoDB.
+4. Socket.IO carries realtime chat, presence, and event updates back to connected clients.
+5. Push notifications are delivered through Web Push when supported.
 
-### Multi-Step Registration
-The signup process is divided into two steps:
-1. **Step 1**: Basic information (name, email, phone, password)
-2. **Step 2**: Profile customization (avatar selection/upload, username, bio)
+## Project Team & Contributions
 
-### Real-Time Communication
-Socket.IO powers all real-time features:
-- Message delivery and receipt
-- Typing indicators
-- User presence (online/offline/away/busy)
-- Live notifications
+### Members
 
-## 🚢 Deployment
+- **Frontend**: Rudrashis Das, Jaya Mondal, Ankur Barik, Sayan Ghosh
+- **Backend**: Abhrajyoti Nath ([@abhrajyoti-01](https://github.com/abhrajyoti-01))
 
-### Build for Production
+### Contribution Overview
+
+This project automatically tracks who contributed and how much work they submitted based on GitHub history. Below you can see the dynamic contributors metrics shown by `contrib.rocks` and Shields.io:
+
+[![GitHub Contributors](https://img.shields.io/github/contributors/ViktorRez99/Vaaniarc_chatApp?style=for-the-badge&color=8CC84B)](https://github.com/ViktorRez99/Vaaniarc_chatApp/graphs/contributors)
+
+[![Contributors list](https://contrib.rocks/image?repo=ViktorRez99/Vaaniarc_chatApp)](https://github.com/ViktorRez99/Vaaniarc_chatApp/graphs/contributors)
+
+*(Information auto-updates based on commits pushed to the repository).*
+
+## Important Notes
+
+- Support and issue tracking should go through GitHub Issues.
+- If contributor identities change or more commits are pushed under different names, update the contribution table accordingly.
+
+## Build
 
 ```bash
 npm run build
 ```
 
-This creates optimized production builds for both frontend and backend.
+## Test
 
-### Environment Variables for Production
+```bash
+npm test
+```
 
-Ensure all environment variables are properly set in your production environment, especially:
-- `NODE_ENV=production`
-- `MONGODB_URI` (production database)
-- `JWT_SECRET` (strong secret key)
-- `CLIENT_URL` (your production frontend URL)
+## Support
 
-## 📝 API Endpoints
-
-### Authentication
-- `POST /api/auth/register` - Register new user
-- `POST /api/auth/login` - User login
-- `POST /api/auth/logout` - User logout
-- `GET /api/auth/profile` - Get current user
-- `PATCH /api/auth/profile` - Update profile
-- `PUT /api/auth/change-password` - Change password
-
-### Chat
-- `GET /api/chats` - Get all chats
-- `POST /api/chats` - Create new chat
-- `GET /api/chats/:id/messages` - Get chat messages
-- `POST /api/chats/:id/messages` - Send message
-
-### Rooms
-- `GET /api/rooms` - Get all rooms
-- `POST /api/rooms` - Create room
-- `GET /api/rooms/:id` - Get room details
-- `POST /api/rooms/:id/join` - Join room
-
-### Meetings
-- `GET /api/meetings` - Get meetings
-- `POST /api/meetings` - Schedule meeting
-- `GET /api/meetings/:id` - Get meeting details
-
-## 🔒 Security Features
-
-- **Password Hashing**: Bcrypt with salt rounds
-- **JWT Tokens**: Secure authentication tokens
-- **Rate Limiting**: API endpoint protection
-- **Helmet**: Security headers
-- **CORS**: Configured cross-origin requests
-- **Input Validation**: Server-side validation
-- **Socket Authentication**: Secured WebSocket connections
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the project
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License.
-
-## 👥 Authors
-
-- **ViktorRez99** - [GitHub Profile](https://github.com/ViktorRez99)
-
-## 🙏 Acknowledgments
-
-- Socket.IO for real-time communication
-- MongoDB for flexible data storage
-- React team for the amazing framework
-- Tailwind CSS for the utility-first approach
-- Radix UI for accessible components
-
-## 📞 Support
-
-For support, email your-email@example.com or open an issue on GitHub.
-
----
-
-**VaaniArc** - Connect • Collaborate • Create
+Open an issue in this repository for bugs, fixes, or feature requests.

@@ -27,9 +27,25 @@ const keyTransparencyEntrySchema = new mongoose.Schema({
     type: Number,
     default: 2
   },
+  cryptoProfileHash: {
+    type: String,
+    default: null
+  },
+  coldPathMaterialHash: {
+    type: String,
+    default: null
+  },
   previousEntryHash: {
     type: String,
     default: null
+  },
+  logIndex: {
+    type: Number,
+    required: true
+  },
+  logRootHash: {
+    type: String,
+    required: true
   },
   entryHash: {
     type: String,
@@ -46,5 +62,6 @@ const keyTransparencyEntrySchema = new mongoose.Schema({
 
 keyTransparencyEntrySchema.index({ user: 1, occurredAt: 1, createdAt: 1 });
 keyTransparencyEntrySchema.index({ user: 1, deviceId: 1, occurredAt: 1 });
+keyTransparencyEntrySchema.index({ user: 1, logIndex: 1 }, { unique: true });
 
 module.exports = mongoose.model('KeyTransparencyEntry', keyTransparencyEntrySchema);

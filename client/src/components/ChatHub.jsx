@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { MessageCircle, Video, Users, Settings as SettingsIcon, Search, Plus, Zap, LogOut, Archive, FileText, Circle, Check } from 'lucide-react';
 import ChatsPage from './ChatsPage';
@@ -43,6 +43,16 @@ const ChatHub = () => {
     }
   };
 
+  const handleQuickMeeting = useCallback(async () => {
+    navigate('/chat?tab=meetings');
+
+    setTimeout(() => {
+      if (meetingsPageRef.current) {
+        meetingsPageRef.current.startInstantMeeting();
+      }
+    }, 100);
+  }, [navigate]);
+
   useEffect(() => {
     const handleQuickMeetingEvent = () => {
       handleQuickMeeting();
@@ -53,7 +63,7 @@ const ChatHub = () => {
     return () => {
       window.removeEventListener('quickMeeting', handleQuickMeetingEvent);
     };
-  }, []);
+  }, [handleQuickMeeting]);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -68,16 +78,6 @@ const ChatHub = () => {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
-
-  const handleQuickMeeting = async () => {
-    navigate('/chat?tab=meetings');
-
-    setTimeout(() => {
-      if (meetingsPageRef.current) {
-        meetingsPageRef.current.startInstantMeeting();
-      }
-    }, 100);
-  };
 
   const handleTabChange = (tab) => {
     setActiveTab(tab);

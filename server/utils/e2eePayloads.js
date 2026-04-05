@@ -48,6 +48,7 @@ const validateDeviceBoundPayload = ({
   requireSelfEnvelope = false
 }) => {
   const metadata = getPayloadMetadata({ encryptedContent, encryptionPayload });
+  const parsedPayload = parseEncryptedPayload(encryptedContent || encryptionPayload || null);
   const hasSecurePayload = Boolean(encryptedContent || encryptionPayload);
 
   if (!hasSecurePayload) {
@@ -104,6 +105,29 @@ const validateDeviceBoundPayload = ({
       isValid: false,
       error: 'The encrypted payload does not include the current sender device.'
     };
+  }
+
+  if (metadata.protocolVersion >= 4) {
+    const envelopes = Array.isArray(parsedPayload?.envelopes) ? parsedPayload.envelopes : [];
+    const hasMalformedEnvelope = envelopes.some((envelope) => {
+      const counter = Number(envelope?.counter);
+
+      return !['prekey', 'session'].includes(envelope?.mode)
+        || !Number.isInteger(counter)
+        || counter < 0
+        || typeof envelope?.nonce !== 'string'
+        || typeof envelope?.ciphertext !== 'string'
+        || typeof envelope?.ratchet?.ciphertext !== 'string'
+        || typeof envelope?.ratchet?.commitment !== 'string';
+    });
+
+    if (hasMalformedEnvelope) {
+      return {
+        ...metadata,
+        isValid: false,
+        error: 'The encrypted payload is missing direct-session ratchet metadata.'
+      };
+    }
   }
 
   return {

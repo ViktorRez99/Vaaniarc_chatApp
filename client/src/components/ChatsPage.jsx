@@ -52,6 +52,7 @@ const ChatsPage = () => {
     selectedChatRef.current = selectedChat;
   }, [selectedChat]);
 
+  // Register the page-level socket listeners once against the shared socket service.
   useEffect(() => {
     fetchChats();
     setupSocketListeners();
@@ -59,6 +60,7 @@ const ChatsPage = () => {
     return () => {
       cleanupSocketListeners();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -278,7 +280,7 @@ const ChatsPage = () => {
     });
   };
 
-  const handleUserTyping = ({ chatId, userId, username }) => {
+  const handleUserTyping = ({ chatId, username }) => {
     const currentSelectedChat = selectedChatRef.current;
     if (currentSelectedChat && idsEqual(chatId, currentSelectedChat._id)) {
       setTypingUsers(prev => new Set([...prev, username]));
@@ -304,7 +306,7 @@ const ChatsPage = () => {
     }
   };
 
-  const handleMessagesRead = ({ chatId, readBy }) => {
+  const handleMessagesRead = ({ chatId }) => {
     const currentSelectedChat = selectedChatRef.current;
     if (currentSelectedChat && idsEqual(chatId, currentSelectedChat._id)) {
       setMessages(prev => prev.map(msg => {

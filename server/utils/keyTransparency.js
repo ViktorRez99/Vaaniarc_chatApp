@@ -28,7 +28,8 @@ const buildTransparencyBundleHash = (keyBundle = {}, keyBundleVersion = 2) => sh
     ? {
         id: keyBundle.signedPreKey.id || null,
         publicKey: keyBundle.signedPreKey.publicKey || null,
-        signature: keyBundle.signedPreKey.signature || null
+        signature: keyBundle.signedPreKey.signature || null,
+        pqSignature: keyBundle.signedPreKey.pqSignature || null
       }
     : null,
   oneTimePreKeys: Array.isArray(keyBundle.oneTimePreKeys)
@@ -45,6 +46,8 @@ const buildTransparencyPayload = ({
   action,
   fingerprint,
   bundleHash,
+  cryptoProfileHash = null,
+  coldPathMaterialHash = null,
   keyBundleVersion,
   occurredAt
 }) => ({
@@ -53,6 +56,8 @@ const buildTransparencyPayload = ({
   action: String(action || ''),
   fingerprint: fingerprint || null,
   bundleHash: bundleHash || null,
+  cryptoProfileHash: cryptoProfileHash || null,
+  coldPathMaterialHash: coldPathMaterialHash || null,
   keyBundleVersion: Number(keyBundleVersion || 2),
   occurredAt: new Date(occurredAt || new Date()).toISOString()
 });
@@ -61,29 +66,63 @@ const buildTransparencyEntryHash = ({ previousEntryHash = null, payload }) => sh
   `${previousEntryHash || 'root'}:${stableStringify(payload)}`
 );
 
-const verifyTransparencyChain = (entries = []) => {
-  let previousEntryHash = null;
+const buildTransparencyLogRoot = ({ previousRootHash = null, entryHash = null }) => sha256Hex(
+  `${previousRootHash || 'root'}:${entryHash || ''}`
+);
 
-  for (const entry of entries) {
+const buildTransparencyCheckpoint = (entries = []) => {
+  let previousEntryHash = null;
+  let previousRootHash = null;
+  let verified = true;
+
+  entries.forEach((entry, index) => {
+    if (!verified) {
+      return;
+    }
+
     const payload = buildTransparencyPayload(entry);
     const expectedHash = buildTransparencyEntryHash({
       previousEntryHash,
       payload
     });
+    const expectedRootHash = buildTransparencyLogRoot({
+      previousRootHash,
+      entryHash: expectedHash
+    });
 
-    if (entry.previousEntryHash !== previousEntryHash || entry.entryHash !== expectedHash) {
-      return false;
+    const hasLegacyCheckpoint = entry.logIndex == null || !entry.logRootHash;
+
+    if (
+      entry.previousEntryHash !== previousEntryHash
+      || entry.entryHash !== expectedHash
+      || (!hasLegacyCheckpoint && Number(entry.logIndex) !== index)
+      || (!hasLegacyCheckpoint && entry.logRootHash !== expectedRootHash)
+    ) {
+      verified = false;
+      return;
     }
 
-    previousEntryHash = entry.entryHash;
-  }
+    previousEntryHash = expectedHash;
+    previousRootHash = hasLegacyCheckpoint ? expectedRootHash : entry.logRootHash;
+  });
 
-  return true;
+  return {
+    verified,
+    head: previousEntryHash,
+    rootHash: previousRootHash,
+    treeSize: entries.length
+  };
+};
+
+const verifyTransparencyChain = (entries = []) => {
+  return buildTransparencyCheckpoint(entries).verified;
 };
 
 module.exports = {
   buildTransparencyBundleHash,
   buildTransparencyEntryHash,
+  buildTransparencyLogRoot,
+  buildTransparencyCheckpoint,
   buildTransparencyPayload,
   stableStringify,
   verifyTransparencyChain
