@@ -3,6 +3,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { MessageCircle, Video, Users, Settings as SettingsIcon, Search, Plus, Zap, LogOut, Archive, FileText, Circle, Check } from 'lucide-react';
 import ChatsPage from './ChatsPage';
 import MeetingsPage from './MeetingsPage';
+import RuntimeStatusBanner from './RuntimeStatusBanner';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 
@@ -347,6 +348,9 @@ const ChatHub = () => {
       </header>
 
       <main className="pt-16 md:pt-20">
+        <div className="mx-auto max-w-7xl px-4 pt-4 md:px-6">
+          <RuntimeStatusBanner />
+        </div>
         {activeTab === 'chats' && <ChatsPage />}
         {activeTab === 'meetings' && <MeetingsPage ref={meetingsPageRef} meetingIdFromRoute={meetingId} />}
       </main>

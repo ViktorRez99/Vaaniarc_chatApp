@@ -1,5 +1,7 @@
+const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
+const bcrypt = require('bcryptjs');
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const User = require('../models/User');
@@ -8,12 +10,24 @@ const authenticateToken = require('../middleware/auth');
 const { log2FAEnable, log2FADisable } = require('../middleware/auditLog');
 const requireCsrf = authenticateToken.requireCsrf;
 
+const sanitizeToken = (token) => typeof token === 'string' ? token.trim() : '';
+const generateBackupCodes = (count = 8) => Array.from(
+  { length: count },
+  () => crypto.randomBytes(4).toString('hex').toUpperCase()
+);
+const sanitizeBackupCodes = (backupCodes) => Array.isArray(backupCodes)
+  ? backupCodes
+    .map((code) => String(code || '').trim().toUpperCase())
+    .filter(Boolean)
+    .slice(0, 10)
+  : [];
+
 router.post('/setup', authenticateToken, requireCsrf, async (req, res) => {
   try {
     const userId = req.user._id;
 
-    const existing = await TwoFactor.findOne({ user: userId, enabled: true });
-    if (existing) {
+    const existing = await TwoFactor.findOne({ user: userId });
+    if (existing?.enabled) {
       return res.status(400).json({ message: '2FA is already enabled' });
     }
 
@@ -22,6 +36,17 @@ router.post('/setup', authenticateToken, requireCsrf, async (req, res) => {
       name: `VaaniArc (@${user?.username || userId})`,
       length: 20
     });
+
+    await TwoFactor.findOneAndUpdate(
+      { user: userId },
+      {
+        user: userId,
+        secret: secret.base32,
+        enabled: false,
+        backupCodes: []
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
     const qrCodeUrl = await QRCode.toDataURL(secret.otpauth_url);
 
@@ -38,7 +63,8 @@ router.post('/setup', authenticateToken, requireCsrf, async (req, res) => {
 
 router.post('/enable', authenticateToken, requireCsrf, async (req, res) => {
   try {
-    const { token, backupCodes } = req.body;
+    const token = sanitizeToken(req.body?.token);
+    const backupCodes = sanitizeBackupCodes(req.body?.backupCodes);
     const userId = req.user._id;
 
     const existing = await TwoFactor.findOne({ user: userId });
@@ -46,18 +72,15 @@ router.post('/enable', authenticateToken, requireCsrf, async (req, res) => {
       return res.status(400).json({ message: '2FA is already enabled' });
     }
 
-    const verified = speakeasy.totp.verify({
-      secret: existing?.secret,
-      encoding: 'base32',
-      token,
-      window: 1
-    });
-
-    if (!verified && !existing?.secret) {
-      return res.status(400).json({ message: 'Invalid verification code' });
+    if (!token) {
+      return res.status(400).json({ message: 'Verification code is required' });
     }
 
-    const secret = existing?.secret || speakeasy.generateSecret({ name: `VaaniArc (${userId})`, length: 20 }).base32;
+    if (!existing?.secret) {
+      return res.status(400).json({ message: 'Start 2FA setup again before enabling it.' });
+    }
+
+    const secret = existing.secret;
 
     const finalVerified = speakeasy.totp.verify({
       secret,
@@ -70,7 +93,10 @@ router.post('/enable', authenticateToken, requireCsrf, async (req, res) => {
       return res.status(400).json({ message: 'Invalid verification code' });
     }
 
-    const hashedCodes = backupCodes?.map(code => require('bcryptjs').hashSync(code, 10)) || [];
+    const resolvedBackupCodes = backupCodes.length > 0 ? backupCodes : generateBackupCodes();
+    const hashedCodes = await Promise.all(
+      resolvedBackupCodes.map((code) => bcrypt.hash(code, 10))
+    );
 
     await TwoFactor.findOneAndUpdate(
       { user: userId },
@@ -85,7 +111,10 @@ router.post('/enable', authenticateToken, requireCsrf, async (req, res) => {
 
     await log2FAEnable(userId, req);
 
-    res.json({ message: '2FA enabled successfully' });
+    res.json({
+      message: '2FA enabled successfully',
+      backupCodes: resolvedBackupCodes
+    });
   } catch (error) {
     console.error('2FA enable error:', error);
     res.status(500).json({ message: 'Failed to enable 2FA' });
@@ -94,13 +123,17 @@ router.post('/enable', authenticateToken, requireCsrf, async (req, res) => {
 
 router.post('/verify', authenticateToken, requireCsrf, async (req, res) => {
   try {
-    const { token } = req.body;
+    const token = sanitizeToken(req.body?.token);
     const userId = req.user._id;
 
     const twoFactor = await TwoFactor.findOne({ user: userId, enabled: true });
 
     if (!twoFactor) {
       return res.status(400).json({ message: '2FA is not enabled' });
+    }
+
+    if (!token) {
+      return res.status(400).json({ message: 'Verification code is required' });
     }
 
     const verified = speakeasy.totp.verify({
@@ -123,8 +156,13 @@ router.post('/verify', authenticateToken, requireCsrf, async (req, res) => {
 
 router.post('/disable', authenticateToken, requireCsrf, async (req, res) => {
   try {
-    const { password, token } = req.body;
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const token = sanitizeToken(req.body?.token);
     const userId = req.user._id;
+
+    if (!password || !token) {
+      return res.status(400).json({ message: 'Password and verification code are required' });
+    }
 
     const user = await User.findById(userId);
     const isValid = await user.comparePassword(password);
@@ -167,7 +205,8 @@ router.get('/status', authenticateToken, async (req, res) => {
 
     res.json({
       enabled: twoFactor?.enabled || false,
-      hasBackupCodes: twoFactor?.backupCodes?.length > 0
+      hasBackupCodes: twoFactor?.backupCodes?.length > 0,
+      pendingSetup: Boolean(twoFactor?.secret && !twoFactor?.enabled)
     });
   } catch (error) {
     console.error('2FA status error:', error);

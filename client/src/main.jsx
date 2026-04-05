@@ -16,15 +16,22 @@ if (!rootElement) {
 }
 
 const root = createRoot(rootElement || document.getElementById("root"))
+const appTree = (
+  <BrowserRouter>
+    <App />
+  </BrowserRouter>
+)
 
 registerServiceWorker().catch((error) => {
   console.error("Service worker registration failed:", error)
 })
 
 root.render(
-  <StrictMode>
-    <BrowserRouter>
-      <App />
-    </BrowserRouter>
-  </StrictMode>,
+  import.meta.env.DEV
+    ? appTree
+    : (
+      <StrictMode>
+        {appTree}
+      </StrictMode>
+    ),
 )

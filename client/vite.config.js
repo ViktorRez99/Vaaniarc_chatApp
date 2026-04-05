@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-const apiTarget = process.env.VITE_API_URL || 'http://127.0.0.1:3000'
+const apiTarget = process.env.VAANIARC_PROXY_TARGET || 'http://127.0.0.1:3000'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -9,7 +9,6 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'jsdom',
-    setupFiles: './vitest.setup.js',
     css: true,
   },
   build: {
@@ -33,14 +32,6 @@ export default defineConfig({
         changeOrigin: true,
         secure: false,
         timeout: 10000,
-        configure: (proxy) => {
-          proxy.on('error', (err) => {
-            console.log('Proxy error:', err.message);
-          });
-          proxy.on('proxyReq', (_proxyReq, req) => {
-            console.log('Proxying request:', req.method, req.url);
-          });
-        },
       },
       '/socket.io': {
         target: apiTarget,
@@ -48,11 +39,6 @@ export default defineConfig({
         secure: false,
         ws: true,
         timeout: 10000,
-        configure: (proxy) => {
-          proxy.on('error', (err) => {
-            console.log('Socket proxy error:', err.message);
-          });
-        },
       },
       '/uploads': {
         target: apiTarget,

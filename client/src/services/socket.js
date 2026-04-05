@@ -22,15 +22,100 @@ class SocketService {
     this.flushInProgress = false;
     this.onlineListenerAttached = false;
     this.listenerMap = new Map();
+    this.status = 'idle';
+    this.lastError = null;
+    this.statusListeners = new Set();
     this.handleBrowserOnline = this.handleBrowserOnline.bind(this);
     this.handleBrowserOffline = this.handleBrowserOffline.bind(this);
   }
 
   getSocketUrl() {
-    return import.meta.env.VITE_SOCKET_URL
-      || (import.meta.env.MODE === 'production'
-        ? window.location.origin
-        : window.location.origin.replace(':5173', ':3000'));
+    const configuredSocketUrl = typeof import.meta.env.VITE_SOCKET_URL === 'string'
+      ? import.meta.env.VITE_SOCKET_URL.trim()
+      : '';
+    return configuredSocketUrl || undefined;
+  }
+
+  getStatusSnapshot() {
+    return {
+      status: this.status,
+      isConnected: this.isConnected,
+      error: this.lastError
+    };
+  }
+
+  notifyStatus(status, details = {}) {
+    this.status = status;
+    this.lastError = details.error || null;
+
+    const snapshot = this.getStatusSnapshot();
+    this.statusListeners.forEach((listener) => {
+      try {
+        listener(snapshot);
+      } catch (error) {
+        console.error('Socket status listener failed:', error);
+      }
+    });
+  }
+
+  subscribeStatus(listener) {
+    this.statusListeners.add(listener);
+    listener(this.getStatusSnapshot());
+
+    return () => {
+      this.statusListeners.delete(listener);
+    };
+  }
+
+  attachRegisteredListeners() {
+    if (!this.socket) {
+      return;
+    }
+
+    this.listenerMap.forEach((wrappedCallbacks, event) => {
+      wrappedCallbacks.forEach((wrappedCallback) => {
+        this.socket.on(event, wrappedCallback);
+      });
+    });
+  }
+
+  attachSocketLifecycleListeners() {
+    if (!this.socket) {
+      return;
+    }
+
+    this.socket.on('connect', () => {
+      console.log('Socket connected:', this.socket.id);
+      this.isConnected = true;
+      this.notifyStatus('connected');
+      this.flushOfflineQueue();
+    });
+
+    this.socket.on('disconnect', (reason) => {
+      console.log('Socket disconnected:', reason);
+      this.isConnected = false;
+      this.notifyStatus('disconnected', {
+        error: reason && reason !== 'io client disconnect'
+          ? new Error(`Realtime connection closed: ${reason}`)
+          : null
+      });
+    });
+
+    this.socket.on('connect_error', (error) => {
+      console.warn('Socket connection error:', error);
+      this.isConnected = false;
+      this.notifyStatus('error', { error });
+    });
+
+    this.socket.on('message_sent', (payload) => {
+      const decodedPayload = decodeSocketPayload(payload);
+      this.acknowledgeQueuedMessage(decodedPayload?.tempId);
+    });
+
+    this.socket.on('room_message', (payload) => {
+      const decodedPayload = decodeSocketPayload(payload);
+      this.acknowledgeQueuedMessage(decodedPayload?.tempId);
+    });
   }
 
   loadOfflineQueue() {
@@ -147,6 +232,7 @@ class SocketService {
 
   handleBrowserOnline() {
     if (this.socket && !this.isConnected) {
+      this.notifyStatus('connecting');
       this.socket.connect();
     }
 
@@ -155,53 +241,82 @@ class SocketService {
 
   handleBrowserOffline() {
     this.isConnected = false;
+    this.notifyStatus('disconnected', {
+      error: new Error('The browser is offline.')
+    });
   }
 
-  connect() {
-    if (this.socket) {
-      this.disconnect();
-    }
+  connect(options = {}) {
+    const {
+      waitForConnection = false,
+      timeoutMs = 8000
+    } = options;
 
-    this.socket = io(this.getSocketUrl(), {
-      transports: ['websocket', 'polling'],
-      timeout: 10000,
-      withCredentials: true,
-      reconnection: true,
-      reconnectionAttempts: 12,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 15000,
-      randomizationFactor: 0.5
-    });
+    if (!this.socket) {
+      this.socket = io(this.getSocketUrl(), {
+        autoConnect: false,
+        path: '/socket.io',
+        transports: ['websocket', 'polling'],
+        timeout: 10000,
+        withCredentials: true,
+        reconnection: true,
+        reconnectionAttempts: 12,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 15000,
+        randomizationFactor: 0.5
+      });
+      this.attachSocketLifecycleListeners();
+      this.attachRegisteredListeners();
+    }
 
     this.attachBrowserListeners();
 
-    this.socket.on('connect', () => {
-      console.log('Socket connected:', this.socket.id);
+    if (this.socket.connected) {
       this.isConnected = true;
-      this.flushOfflineQueue();
-    });
+      this.notifyStatus('connected');
+      return waitForConnection ? Promise.resolve(this.socket) : this.socket;
+    }
 
-    this.socket.on('disconnect', (reason) => {
-      console.log('Socket disconnected:', reason);
-      this.isConnected = false;
-    });
+    this.notifyStatus('connecting');
+    this.socket.connect();
 
-    this.socket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
-      this.isConnected = false;
-    });
+    if (!waitForConnection) {
+      return this.socket;
+    }
 
-    this.socket.on('message_sent', (payload) => {
-      const decodedPayload = decodeSocketPayload(payload);
-      this.acknowledgeQueuedMessage(decodedPayload?.tempId);
-    });
+    return new Promise((resolve, reject) => {
+      let timeoutId = null;
+      const cleanup = () => {
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+        }
+        this.socket.off('connect', handleConnect);
+        this.socket.off('connect_error', handleError);
+      };
 
-    this.socket.on('room_message', (payload) => {
-      const decodedPayload = decodeSocketPayload(payload);
-      this.acknowledgeQueuedMessage(decodedPayload?.tempId);
-    });
+      const handleConnect = () => {
+        cleanup();
+        resolve(this.socket);
+      };
 
-    return this.socket;
+      const handleError = (error) => {
+        cleanup();
+        reject(error instanceof Error ? error : new Error('Realtime connection failed.'));
+      };
+
+      timeoutId = typeof window !== 'undefined'
+        ? window.setTimeout(() => {
+          cleanup();
+          reject(new Error('Realtime connection timed out.'));
+        }, timeoutMs)
+        : setTimeout(() => {
+          cleanup();
+          reject(new Error('Realtime connection timed out.'));
+        }, timeoutMs);
+
+      this.socket.once('connect', handleConnect);
+      this.socket.once('connect_error', handleError);
+    });
   }
 
   disconnect() {
@@ -213,7 +328,7 @@ class SocketService {
     this.detachBrowserListeners();
     this.isConnected = false;
     this.flushInProgress = false;
-    this.listenerMap.clear();
+    this.notifyStatus('idle');
   }
 
   emit(event, data, options = {}) {
@@ -234,26 +349,33 @@ class SocketService {
   }
 
   on(event, callback) {
-    if (this.socket) {
-      if (!this.listenerMap.has(event)) {
-        this.listenerMap.set(event, new Map());
-      }
+    if (!this.listenerMap.has(event)) {
+      this.listenerMap.set(event, new Map());
+    }
 
-      const wrappedCallback = (payload, ...args) => callback(decodeSocketPayload(payload), ...args);
-      this.listenerMap.get(event).set(callback, wrappedCallback);
+    if (this.listenerMap.get(event).has(callback)) {
+      return;
+    }
+
+    const wrappedCallback = (payload, ...args) => callback(decodeSocketPayload(payload), ...args);
+    this.listenerMap.get(event).set(callback, wrappedCallback);
+
+    if (this.socket) {
       this.socket.on(event, wrappedCallback);
     }
   }
 
   off(event, callback) {
+    const wrappedCallback = this.listenerMap.get(event)?.get(callback) || callback;
+
     if (this.socket) {
-      const wrappedCallback = this.listenerMap.get(event)?.get(callback) || callback;
       this.socket.off(event, wrappedCallback);
-      if (this.listenerMap.get(event)?.get(callback) === wrappedCallback) {
-        this.listenerMap.get(event).delete(callback);
-        if (this.listenerMap.get(event).size === 0) {
-          this.listenerMap.delete(event);
-        }
+    }
+
+    if (this.listenerMap.get(event)?.get(callback) === wrappedCallback) {
+      this.listenerMap.get(event).delete(callback);
+      if (this.listenerMap.get(event).size === 0) {
+        this.listenerMap.delete(event);
       }
     }
   }

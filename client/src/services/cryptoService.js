@@ -20,6 +20,8 @@ import {
   verifyPostQuantumSignature
 } from '../utils/postQuantumCrypto';
 import {
+  deleteDeviceKeyMaterial,
+  deleteDeviceSessionsForDevice,
   loadDeviceKeyMaterial,
   saveDeviceKeyMaterial,
   loadDeviceSession,
@@ -321,12 +323,7 @@ const cryptoService = {
 
     const serializedDevices = sortDeviceBundles(devices).map((device) => ({
       deviceId: device.deviceId,
-      fingerprint: device.keyBundle?.fingerprint || device.publicKeyFingerprint || null,
-      signingPublicKey: device.keyBundle?.signingPublicKey || null,
-      encryptionPublicKey: device.keyBundle?.encryptionPublicKey || null,
-      postQuantumSignaturePublicKey: device.keyBundle?.auxiliaryBundles?.postQuantum?.signatures?.publicKey || null,
-      postQuantumKemSignedPreKey: device.keyBundle?.auxiliaryBundles?.postQuantum?.kem?.signedPreKey?.publicKey || null,
-      cryptoProfile: device.cryptoProfile || null
+      ...this.buildDeviceFingerprintMaterial(device)
     }));
 
     return this.getFingerprintForValue(serializedDevices);
@@ -636,12 +633,16 @@ const cryptoService = {
   },
 
   buildDeviceFingerprintMaterial(identity = {}) {
+    const keyBundle = identity?.keyBundle || identity || {};
+    const auxiliaryBundles = identity?.auxiliaryBundles || keyBundle?.auxiliaryBundles || null;
+
     return {
-      algorithm: identity.algorithm || DEVICE_ALGORITHM,
-      encryptionPublicKey: identity.encryptionPublicKey || null,
-      signingPublicKey: identity.signingPublicKey || null,
-      postQuantumSignaturePublicKey: identity.postQuantum?.signatures?.publicKey || null,
-      postQuantumKemSignedPreKey: identity.postQuantum?.kem?.signedPreKey?.publicKey || null
+      algorithm: keyBundle.algorithm || identity.algorithm || DEVICE_ALGORITHM,
+      encryptionPublicKey: keyBundle.encryptionPublicKey || identity.encryptionPublicKey || null,
+      signingPublicKey: keyBundle.signingPublicKey || identity.signingPublicKey || null,
+      postQuantumSignaturePublicKey: auxiliaryBundles?.postQuantum?.signatures?.publicKey
+        || identity?.postQuantum?.signatures?.publicKey
+        || null
     };
   },
 
@@ -1192,7 +1193,12 @@ const cryptoService = {
     await this.activateDeviceIdentityV2(userId, nextIdentity);
 
     const localFingerprint = nextIdentity.fingerprint;
-    const serverFingerprint = currentPublishedDevice?.keyBundle?.fingerprint || currentPublishedDevice?.publicKeyFingerprint || null;
+    const publishedDeviceFingerprint = currentPublishedDevice?.keyBundle?.fingerprint
+      || currentPublishedDevice?.publicKeyFingerprint
+      || null;
+    const serverFingerprint = currentPublishedDevice
+      ? await this.getFingerprintForValue(this.buildDeviceFingerprintMaterial(currentPublishedDevice))
+      : null;
 
     if (serverFingerprint && serverFingerprint !== localFingerprint) {
       return {
@@ -1208,8 +1214,10 @@ const cryptoService = {
       || !currentPublishedDevice.keyBundle?.signedPreKey?.publicKey
       || !Array.isArray(currentPublishedDevice.keyBundle?.oneTimePreKeys)
       || currentPublishedDevice.keyBundle.oneTimePreKeys.length < LOW_ONE_TIME_PREKEY_THRESHOLD;
+    const requiresFingerprintRefresh = Boolean(currentPublishedDevice) && publishedDeviceFingerprint !== localFingerprint;
+    const shouldPublish = requiresPublish || requiresFingerprintRefresh;
 
-    if (requiresPublish) {
+    if (shouldPublish) {
       try {
         await this.publishDeviceIdentityV2(userId, nextIdentity);
       } catch (publishError) {
@@ -1229,9 +1237,55 @@ const cryptoService = {
       status: 'ready',
       userId,
       fingerprint: localFingerprint,
-      serverFingerprint: serverFingerprint || localFingerprint,
-      message: 'Per-device end-to-end encryption is active on this browser.'
+      serverFingerprint: localFingerprint,
+      publishStatus: requiresFingerprintRefresh ? 'recovered' : 'ok',
+      message: requiresFingerprintRefresh
+        ? 'Per-device end-to-end encryption is active on this browser. The published device bundle was refreshed to match the local keys.'
+        : 'Per-device end-to-end encryption is active on this browser.'
     };
+  },
+
+  async resetCurrentDeviceIdentity(user) {
+    const userId = normalizeId(user?._id || user?.id || user);
+    const deviceId = this.getCurrentDeviceId();
+
+    if (!userId || !deviceId) {
+      throw new Error('This browser cannot reset the current device encryption state.');
+    }
+
+    const previousStoredIdentity = await this.loadDeviceIdentityV2(userId);
+    const previousActiveUserId = this.activeUserId;
+    const previousDeviceIdentity = this.deviceIdentity;
+    const nextIdentity = await this.generateDeviceIdentityV2(userId);
+
+    try {
+      await this.persistDeviceIdentityV2(userId, nextIdentity);
+      await this.activateDeviceIdentityV2(userId, nextIdentity);
+      await this.publishDeviceIdentityV2(userId, nextIdentity);
+    } catch (error) {
+      if (previousStoredIdentity) {
+        await this.persistDeviceIdentityV2(userId, previousStoredIdentity);
+        await this.activateDeviceIdentityV2(userId, previousStoredIdentity);
+      } else {
+        await deleteDeviceKeyMaterial(userId, deviceId);
+        this.activeUserId = previousActiveUserId || null;
+        this.deviceIdentity = previousDeviceIdentity || null;
+      }
+
+      throw error;
+    }
+
+    try {
+      await deleteDeviceSessionsForDevice(userId, deviceId);
+    } catch (sessionCleanupError) {
+      console.warn('Failed to clear stale encrypted sessions after resetting this device:', sessionCleanupError);
+    }
+
+    this.sessionCache.clear();
+    this.directEnvelopeCache.clear();
+    this.deviceBundleCache.delete(userId);
+
+    return this.ensureIdentity({ _id: userId });
   },
 
   async ensureIdentity(user) {

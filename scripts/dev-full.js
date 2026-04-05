@@ -48,8 +48,7 @@ const findAvailablePort = async (
 };
 
 const createClientEnv = (backendHost, backendPort) => ({
-  VITE_API_URL: `http://${backendHost}:${backendPort}`,
-  VITE_SOCKET_URL: `http://${backendHost}:${backendPort}`
+  VAANIARC_PROXY_TARGET: `http://${backendHost}:${backendPort}`
 });
 
 const run = async () => {

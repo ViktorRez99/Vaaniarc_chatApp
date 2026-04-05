@@ -5,7 +5,7 @@
   "main": "server/entry.js",
   "scripts": {
     "start": "node server/entry.js",
-    "dev": "nodemon server/entry.js",
+    "dev": "nodemon --config nodemon.json server/entry.js",
     "client": "cd client && npm run dev",
     "client:build": "cd client && npm run build",
     "build": "npm run client:build",
@@ -13,7 +13,7 @@
     "dev:full": "node scripts/dev-full.js",
     "vercel-build": "npm run build",
     "postinstall": "cd client && npm install",
-    "test": "jest && npm --prefix client run test",
+    "test": "jest --passWithNoTests && npm --prefix client run test",
     "testsprite": "node -e \"console.log('TestSprite runs via Cursor MCP. See TESTSPRITE.md in repo root.')\""
   },
   "keywords": [

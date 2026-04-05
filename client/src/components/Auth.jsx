@@ -3,7 +3,20 @@ import { useLocation, useNavigate } from "react-router-dom"
 import Cropper from 'react-easy-crop'
 import getCroppedImg from '../utils/cropImage'
 import { useAuth } from "../context/AuthContext"
-import { PASSWORD_POLICY } from "../utils/passwordPolicy"
+import { PASSWORD_POLICY, validatePassword } from "../utils/passwordPolicy"
+
+const USERNAME_REGEX = /^[a-zA-Z0-9_-]+$/
+const isValidEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
+const createInitialFormData = () => ({
+  username: "",
+  email: "",
+  password: "",
+  firstName: "",
+  lastName: "",
+  phone: "",
+  avatar: "",
+  bio: "",
+})
 
 const PasswordStrengthIndicator = ({ password }) => {
   const strength = useMemo(() => {
@@ -142,22 +155,16 @@ const Auth = () => {
   
   const [isLogin, setIsLogin] = useState(!shouldSignup)
   const [step, setStep] = useState(1)
-  const [formData, setFormData] = useState({
-    username: "",
-    email: "",
-    password: "",
-    firstName: "",
-    lastName: "",
-    phone: "",
-    avatar: "",
-    bio: "",
-  })
+  const [formData, setFormData] = useState(createInitialFormData)
+  const [formError, setFormError] = useState("")
 
   const { login, register, isLoading, error, clearError } = useAuth()
+  const authError = formError || error
 
   useEffect(() => {
     setIsLogin(!shouldSignup)
     setStep(1)
+    setFormError("")
     clearError()
   }, [shouldSignup, clearError])
 
@@ -200,6 +207,7 @@ const Auth = () => {
       setImageSrc(null)
     } catch (e) {
       console.error(e)
+      setFormError("Failed to crop the selected image.")
     }
   }
 
@@ -219,71 +227,144 @@ const Auth = () => {
       if (error) {
         clearError()
       }
+
+      if (formError) {
+        setFormError("")
+      }
     },
-    [error, clearError],
+    [clearError, error, formError],
   )
 
   const handleAvatarSelect = (avatarUrl) => {
     setFormData(prev => ({ ...prev, avatar: avatarUrl }))
   }
 
+  const validateSignupStepOne = () => {
+    if (!formData.firstName.trim() || !formData.lastName.trim()) {
+      return "First name and last name are required."
+    }
+
+    if (!formData.email.trim()) {
+      return "Email is required."
+    }
+
+    if (!isValidEmail(formData.email.trim())) {
+      return "Please enter a valid email address."
+    }
+
+    if (!formData.phone.trim()) {
+      return "Phone number is required."
+    }
+
+    const passwordValidation = validatePassword(formData.password)
+    if (!passwordValidation.isValid) {
+      return passwordValidation.error
+    }
+
+    return null
+  }
+
+  const validateSignupStepTwo = () => {
+    const normalizedUsername = formData.username.trim()
+
+    if (!normalizedUsername) {
+      return "Username is required."
+    }
+
+    if (normalizedUsername.length < 3) {
+      return "Username must be at least 3 characters long."
+    }
+
+    if (normalizedUsername.length > 30) {
+      return "Username must be 30 characters or less."
+    }
+
+    if (!USERNAME_REGEX.test(normalizedUsername)) {
+      return "Username can only contain letters, numbers, underscores, and hyphens."
+    }
+
+    return null
+  }
+
   const handleNextStep = (e) => {
     e.preventDefault()
-    if (!formData.firstName || !formData.lastName || !formData.email || !formData.phone || !formData.password) {
-        return;
+    const validationError = validateSignupStepOne()
+
+    if (validationError) {
+      setFormError(validationError)
+      return
     }
+
+    setFormError("")
     setStep(2)
     clearError()
   }
 
   const handlePrevStep = () => {
     setStep(1)
+    setFormError("")
     clearError()
   }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    setFormError("")
 
     try {
       if (isLogin) {
+        if (!formData.username.trim() || !formData.password) {
+          setFormError("Username or email and password are required.")
+          return
+        }
+
         await login({
-          identifier: formData.username,
+          identifier: formData.username.trim(),
           password: formData.password,
         })
       } else {
+        const stepOneError = validateSignupStepOne()
+        if (stepOneError) {
+          setStep(1)
+          setFormError(stepOneError)
+          return
+        }
+
+        const stepTwoError = validateSignupStepTwo()
+        if (stepTwoError) {
+          setFormError(stepTwoError)
+          return
+        }
+
         await register({
           username: formData.username.trim(),
           email: formData.email.trim(),
           password: formData.password,
-          firstName: formData.firstName,
-          lastName: formData.lastName,
-          phone: formData.phone,
+          firstName: formData.firstName.trim(),
+          lastName: formData.lastName.trim(),
+          phone: formData.phone.trim(),
           avatar: formData.avatar,
-          bio: formData.bio,
+          bio: formData.bio.trim(),
         })
       }
       
       navigate('/chat')
     } catch (error) {
-      console.error("Auth error:", error)
+      setFormError(error.message || "Authentication failed.")
     }
   }
 
-  const toggleAuthMode = useCallback(() => {
-    navigate(isLogin ? '/auth?signup=true' : '/auth')
+  const setAuthMode = useCallback((nextIsLogin) => {
+    setIsLogin(nextIsLogin)
+    navigate(nextIsLogin ? '/auth' : '/auth?signup=true')
     setStep(1)
-    setFormData({
-      username: "",
-      email: "",
-      password: "",
-      firstName: "",
-      lastName: "",
-      phone: "",
-      avatar: "",
-      bio: "",
-    })
+    setFormData(createInitialFormData())
+    setFormError("")
     clearError()
-  }, [isLogin, clearError, navigate])
+  }, [clearError, navigate])
+
+  const toggleAuthMode = useCallback(() => {
+    setAuthMode(!isLogin)
+  }, [isLogin, setAuthMode])
 
   const avatars = [
     "https://api.dicebear.com/7.x/avataaars/svg?seed=Felix",
@@ -345,8 +426,9 @@ const Auth = () => {
               className={`flex-1 py-2.5 px-3 rounded-lg z-10 relative transition-all duration-300 font-semibold text-sm focus:outline-none focus:ring-0 border-none bg-transparent ${
                 isLogin ? "text-white" : "text-gray-400 hover:text-gray-300"
               }`}
-              onClick={() => navigate('/auth')}
+              onClick={() => setAuthMode(true)}
               type="button"
+              aria-pressed={isLogin}
             >
               <span className="relative z-10">Sign In</span>
             </button>
@@ -354,14 +436,19 @@ const Auth = () => {
               className={`flex-1 py-2.5 px-3 rounded-lg z-10 relative transition-all duration-300 font-semibold text-sm focus:outline-none focus:ring-0 border-none bg-transparent ${
                 !isLogin ? "text-white" : "text-gray-400 hover:text-gray-300"
               }`}
-              onClick={() => navigate('/auth?signup=true')}
+              onClick={() => setAuthMode(false)}
               type="button"
+              aria-pressed={!isLogin}
             >
               <span className="relative z-10">Sign Up</span>
             </button>
           </div>
 
-          <form onSubmit={isLogin ? handleSubmit : (step === 1 ? handleNextStep : handleSubmit)} className="space-y-3">
+          <form
+            onSubmit={isLogin ? handleSubmit : (step === 1 ? handleNextStep : handleSubmit)}
+            className="space-y-3"
+            noValidate
+          >
             
             {/* Login Form */}
             {isLogin && (
@@ -540,7 +627,7 @@ const Auth = () => {
               </div>
             )}
 
-            {error && (
+            {authError && (
               <div className="flex items-center gap-2 p-3 bg-red-500/15 border border-red-500/30 rounded-xl text-red-300 animate-float-in shadow-sm mt-3">
                 <svg
                   className="w-5 h-5 flex-shrink-0 text-red-400"
@@ -553,7 +640,7 @@ const Auth = () => {
                   <line x1="12" y1="8" x2="12" y2="12" />
                   <line x1="12" y1="16" x2="12.01" y2="16" />
                 </svg>
-                <span className="text-sm font-medium">{error}</span>
+                <span className="text-sm font-medium">{authError}</span>
               </div>
             )}
 

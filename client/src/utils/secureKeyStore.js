@@ -313,3 +313,31 @@ export const deleteDeviceSession = async (userId, deviceId, remoteUserId, remote
   const id = sessionRecordId(userId, deviceId, remoteUserId, remoteDeviceId);
   return deleteRawRecord(DEVICE_SESSIONS_STORE, id);
 };
+
+export const deleteDeviceSessionsForDevice = async (userId, deviceId) => runTransaction(
+  DEVICE_SESSIONS_STORE,
+  'readwrite',
+  (store, resolve, reject) => {
+    const prefix = `${String(userId || '').trim()}:${String(deviceId || '').trim()}:`;
+    const request = store.openCursor();
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+
+      if (!cursor) {
+        resolve(true);
+        return;
+      }
+
+      if (String(cursor.key || '').startsWith(prefix)) {
+        cursor.delete();
+      }
+
+      cursor.continue();
+    };
+
+    request.onerror = () => {
+      reject(request.error || new Error('Failed to clear device sessions from IndexedDB.'));
+    };
+  }
+);

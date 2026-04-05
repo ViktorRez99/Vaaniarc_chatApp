@@ -1,6 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import RuntimeStatusBanner from './RuntimeStatusBanner';
+import apiService from '../services/api';
 import {
   disablePushNotifications,
   getPushStatus,
@@ -25,7 +27,8 @@ export default function Settings() {
     restoreEncryptionBackup,
     refreshDevices,
     renameDevice,
-    revokeDevice
+    revokeDevice,
+    openDeviceEncryptionResetPrompt
   } = useAuth();
   const [activeSection, setActiveSection] = useState("profile");
   const [isEditing, setIsEditing] = useState(false);
@@ -74,6 +77,15 @@ export default function Settings() {
 
   // Privacy & Security States
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
+  const [twoFactorStatusLoading, setTwoFactorStatusLoading] = useState(false);
+  const [twoFactorBusy, setTwoFactorBusy] = useState(false);
+  const [twoFactorModalMode, setTwoFactorModalMode] = useState(null);
+  const [twoFactorSetup, setTwoFactorSetup] = useState(null);
+  const [twoFactorBackupCodes, setTwoFactorBackupCodes] = useState([]);
+  const [twoFactorForm, setTwoFactorForm] = useState({
+    token: '',
+    password: ''
+  });
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [showSessionsExpanded, setShowSessionsExpanded] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(false);
@@ -98,6 +110,21 @@ export default function Settings() {
     'https://api.dicebear.com/7.x/avataaars/svg?seed=Zoe',
     'https://api.dicebear.com/7.x/avataaars/svg?seed=Jack'
   ];
+
+  const resetTwoFactorFlow = useCallback(() => {
+    setTwoFactorModalMode(null);
+    setTwoFactorSetup(null);
+    setTwoFactorBackupCodes([]);
+    setTwoFactorForm({
+      token: '',
+      password: ''
+    });
+  }, []);
+
+  const closeTwoFactorModal = useCallback(() => {
+    resetTwoFactorFlow();
+    setError('');
+  }, [resetTwoFactorFlow]);
 
   // Initialize data from user context
   useEffect(() => {
@@ -168,6 +195,41 @@ export default function Settings() {
       cancelled = true;
     };
   }, [user]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!user) {
+      setTwoFactorEnabled(false);
+      setTwoFactorStatusLoading(false);
+      resetTwoFactorFlow();
+      return undefined;
+    }
+
+    const loadTwoFactorStatus = async () => {
+      try {
+        setTwoFactorStatusLoading(true);
+        const status = await apiService.getTwoFactorStatus();
+        if (!cancelled) {
+          setTwoFactorEnabled(Boolean(status.enabled));
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError.message || 'Failed to load 2FA status.');
+        }
+      } finally {
+        if (!cancelled) {
+          setTwoFactorStatusLoading(false);
+        }
+      }
+    };
+
+    loadTwoFactorStatus();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [resetTwoFactorFlow, user]);
 
   const getFontFamily = () => {
     switch(fontType) {
@@ -330,7 +392,7 @@ export default function Settings() {
       await logout();
       navigate('/');
     } catch (err) {
-      console.error('Logout failed', err);
+      setError(err.message || 'Logout failed.');
     }
   };
 
@@ -374,10 +436,106 @@ export default function Settings() {
     }
   };
 
-  const handleToggle2FA = () => {
-    setTwoFactorEnabled(!twoFactorEnabled);
-    setSuccess(twoFactorEnabled ? 'Two-Factor Authentication disabled!' : 'Two-Factor Authentication enabled!');
-    setTimeout(() => setSuccess(''), 3000);
+  const handleToggle2FA = async () => {
+    if (twoFactorBusy || twoFactorStatusLoading) {
+      return;
+    }
+
+    setError('');
+    setSuccess('');
+
+    if (twoFactorEnabled) {
+      setTwoFactorBackupCodes([]);
+      setTwoFactorSetup(null);
+      setTwoFactorForm({
+        token: '',
+        password: ''
+      });
+      setTwoFactorModalMode('disable');
+      return;
+    }
+
+    try {
+      setTwoFactorBusy(true);
+      const setup = await apiService.setupTwoFactor();
+      setTwoFactorSetup(setup);
+      setTwoFactorBackupCodes([]);
+      setTwoFactorForm({
+        token: '',
+        password: ''
+      });
+      setTwoFactorModalMode('setup');
+    } catch (twoFactorError) {
+      setError(twoFactorError.message || 'Failed to start Two-Factor Authentication setup.');
+    } finally {
+      setTwoFactorBusy(false);
+    }
+  };
+
+  const handleEnableTwoFactor = async () => {
+    if (twoFactorBackupCodes.length > 0) {
+      closeTwoFactorModal();
+      setTimeout(() => setSuccess(''), 3000);
+      return;
+    }
+
+    const token = twoFactorForm.token.trim();
+    if (!token) {
+      setError('Enter the 6-digit code from your authenticator app.');
+      return;
+    }
+
+    try {
+      setTwoFactorBusy(true);
+      const result = await apiService.enableTwoFactor({ token });
+      setTwoFactorEnabled(true);
+      setTwoFactorBackupCodes(Array.isArray(result.backupCodes) ? result.backupCodes : []);
+      setSuccess('Two-Factor Authentication enabled.');
+    } catch (twoFactorError) {
+      setError(twoFactorError.message || 'Failed to enable Two-Factor Authentication.');
+    } finally {
+      setTwoFactorBusy(false);
+    }
+  };
+
+  const handleDisableTwoFactor = async () => {
+    const token = twoFactorForm.token.trim();
+    const password = twoFactorForm.password;
+
+    if (!password || !token) {
+      setError('Password and verification code are required to disable 2FA.');
+      return;
+    }
+
+    try {
+      setTwoFactorBusy(true);
+      await apiService.disableTwoFactor({
+        password,
+        token
+      });
+      setTwoFactorEnabled(false);
+      closeTwoFactorModal();
+      setSuccess('Two-Factor Authentication disabled.');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (twoFactorError) {
+      setError(twoFactorError.message || 'Failed to disable Two-Factor Authentication.');
+    } finally {
+      setTwoFactorBusy(false);
+    }
+  };
+
+  const handleCopyBackupCodes = async () => {
+    if (twoFactorBackupCodes.length === 0) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(twoFactorBackupCodes.join('\n'));
+      setSuccess('Backup codes copied.');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (copyError) {
+      setError(copyError.message || 'Failed to copy backup codes.');
+    }
   };
 
   const handleChangePassword = async () => {
@@ -799,11 +957,25 @@ export default function Settings() {
               >
                 Import Key Backup
               </button>
+              {encryptionState?.status === 'key_mismatch' && (
+                <button
+                  type="button"
+                  onClick={openDeviceEncryptionResetPrompt}
+                  className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2 text-sm font-semibold text-rose-100 transition-colors hover:bg-rose-500/20"
+                >
+                  Reset This Device
+                </button>
+              )}
             </div>
 
             <p className="mt-3 text-xs leading-relaxed text-slate-400">
               Your private key stays on this device. Export a backup before switching browsers or machines, otherwise old encrypted chats cannot be recovered.
             </p>
+            {encryptionState?.status === 'key_mismatch' && (
+              <p className="mt-2 text-xs leading-relaxed text-amber-200">
+                Import a backup first if you still need access to this browser&apos;s old encrypted history. Reset this device only when these local keys are no longer the correct ones for the current device.
+              </p>
+            )}
           </div>
 
           {/* Two-Factor Authentication Toggle */}
@@ -817,15 +989,22 @@ export default function Settings() {
               <div>
                 <div className="text-lg font-bold text-white mb-1">Two-Factor Authentication</div>
                 <div className="text-sm text-slate-400 font-medium">
-                  {twoFactorEnabled ? 'Enabled - Your account is protected' : 'Add an extra layer of security'}
+                  {twoFactorStatusLoading
+                    ? 'Checking authenticator status...'
+                    : twoFactorEnabled
+                      ? 'Enabled - Authenticator verification is active'
+                      : 'Add an authenticator app for stronger sign-in protection'}
                 </div>
               </div>
             </div>
-            <button 
+            <button
+              type="button"
               onClick={handleToggle2FA}
+              aria-label={twoFactorEnabled ? 'Disable two-factor authentication' : 'Enable two-factor authentication'}
+              disabled={twoFactorBusy || twoFactorStatusLoading}
               className={`w-16 h-9 rounded-full relative transition-all duration-300 ${
                 twoFactorEnabled ? 'bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.4)]' : 'bg-slate-700/50'
-              }`}
+              } ${(twoFactorBusy || twoFactorStatusLoading) ? 'cursor-not-allowed opacity-60' : ''}`}
             >
               <div className={`w-7 h-7 rounded-full absolute top-1 transition-all duration-300 shadow-md ${
                 twoFactorEnabled ? 'bg-white right-1' : 'bg-slate-400 left-1'
@@ -1028,6 +1207,168 @@ export default function Settings() {
                 Update Password
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {twoFactorModalMode && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900/80 backdrop-blur-3xl rounded-[2rem] p-8 max-w-md w-full border border-white/10 shadow-2xl ring-1 ring-white/5 animate-fadeIn">
+            <div className="flex items-center justify-between mb-8">
+              <div>
+                <h2 className="text-2xl font-bold text-white">
+                  {twoFactorModalMode === 'disable'
+                    ? 'Disable Two-Factor Authentication'
+                    : twoFactorBackupCodes.length > 0
+                      ? 'Save Your Backup Codes'
+                      : 'Set Up Two-Factor Authentication'}
+                </h2>
+                <p className="mt-1 text-sm text-slate-400">
+                  {twoFactorModalMode === 'disable'
+                    ? 'Confirm with your password and a current authenticator code.'
+                    : twoFactorBackupCodes.length > 0
+                      ? 'Store these recovery codes somewhere safe before closing this dialog.'
+                      : 'Scan the QR code with your authenticator app, then enter the current code.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closeTwoFactorModal}
+                className="text-slate-400 hover:text-white transition-colors p-2 hover:bg-white/10 rounded-full"
+              >
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {twoFactorModalMode === 'setup' && twoFactorBackupCodes.length === 0 && (
+              <div className="space-y-5">
+                {twoFactorSetup?.qrCode && (
+                  <div className="rounded-3xl border border-white/10 bg-white/5 p-5">
+                    <img
+                      src={twoFactorSetup.qrCode}
+                      alt="Two-factor QR code"
+                      className="mx-auto w-52 rounded-2xl bg-white p-3"
+                    />
+                  </div>
+                )}
+
+                {twoFactorSetup?.secret && (
+                  <div className="rounded-2xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-300/70">Manual Secret</div>
+                    <div className="mt-2 break-all font-mono text-sm text-emerald-100">{twoFactorSetup.secret}</div>
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <label htmlFor="two-factor-enable-token" className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">Authenticator Code</label>
+                  <input
+                    id="two-factor-enable-token"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={twoFactorForm.token}
+                    onChange={(e) => setTwoFactorForm((currentValue) => ({
+                      ...currentValue,
+                      token: e.target.value.replace(/\s+/g, '')
+                    }))}
+                    className="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white font-medium placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500/50 transition-all backdrop-blur-sm"
+                    placeholder="Enter the 6-digit code"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleEnableTwoFactor}
+                  disabled={twoFactorBusy}
+                  className="w-full px-6 py-4 bg-emerald-500 hover:bg-emerald-600 text-white rounded-2xl transition-all font-bold shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 hover:-translate-y-0.5 active:translate-y-0 mt-2 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {twoFactorBusy ? 'Enabling...' : 'Enable 2FA'}
+                </button>
+              </div>
+            )}
+
+            {twoFactorModalMode === 'setup' && twoFactorBackupCodes.length > 0 && (
+              <div className="space-y-5">
+                <div className="rounded-2xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+                  Each code can be used once if you lose access to your authenticator app.
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  {twoFactorBackupCodes.map((code) => (
+                    <div
+                      key={code}
+                      className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-center font-mono text-sm font-semibold text-white"
+                    >
+                      {code}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={handleCopyBackupCodes}
+                    className="flex-1 rounded-2xl border border-white/10 bg-white/5 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-white/10"
+                  >
+                    Copy Codes
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleEnableTwoFactor}
+                    className="flex-1 rounded-2xl bg-emerald-500 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-emerald-400"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {twoFactorModalMode === 'disable' && (
+              <div className="space-y-5">
+                <div className="space-y-2">
+                  <label htmlFor="two-factor-disable-password" className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">Current Password</label>
+                  <input
+                    id="two-factor-disable-password"
+                    type="password"
+                    value={twoFactorForm.password}
+                    onChange={(e) => setTwoFactorForm((currentValue) => ({
+                      ...currentValue,
+                      password: e.target.value
+                    }))}
+                    className="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white font-medium placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-rose-500/50 focus:border-rose-500/50 transition-all backdrop-blur-sm"
+                    placeholder="Enter your password"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label htmlFor="two-factor-disable-token" className="text-xs font-bold text-slate-400 uppercase tracking-wider ml-1">Authenticator Code</label>
+                  <input
+                    id="two-factor-disable-token"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={twoFactorForm.token}
+                    onChange={(e) => setTwoFactorForm((currentValue) => ({
+                      ...currentValue,
+                      token: e.target.value.replace(/\s+/g, '')
+                    }))}
+                    className="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white font-medium placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-rose-500/50 focus:border-rose-500/50 transition-all backdrop-blur-sm"
+                    placeholder="Enter the 6-digit code"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleDisableTwoFactor}
+                  disabled={twoFactorBusy}
+                  className="w-full px-6 py-4 bg-rose-500 hover:bg-rose-600 text-white rounded-2xl transition-all font-bold shadow-lg shadow-rose-500/25 hover:shadow-rose-500/40 hover:-translate-y-0.5 active:translate-y-0 mt-2 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {twoFactorBusy ? 'Disabling...' : 'Disable 2FA'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1613,6 +1954,7 @@ export default function Settings() {
 
         <div className="flex-1 p-6 overflow-y-auto custom-scrollbar">
           <div className="max-w-3xl mx-auto pb-10">
+            <RuntimeStatusBanner className="mb-6" />
             {renderContent()}
           </div>
         </div>

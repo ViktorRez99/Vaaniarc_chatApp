@@ -1,10 +1,24 @@
 import { getCurrentDeviceSnapshot, getOrCreateDeviceId } from '../utils/device';
 
 // API Service for authentication and chat functionality
-const API_BASE_URL = import.meta.env.VITE_API_URL 
-  ? `${import.meta.env.VITE_API_URL}/api` 
-  : '/api';
+const resolveApiBaseUrl = () => {
+  const configuredBaseUrl = typeof import.meta.env.VITE_API_URL === 'string'
+    ? import.meta.env.VITE_API_URL.trim()
+    : '';
+
+  if (!configuredBaseUrl) {
+    return '/api';
+  }
+
+  return configuredBaseUrl.endsWith('/api')
+    ? configuredBaseUrl
+    : `${configuredBaseUrl.replace(/\/+$/, '')}/api`;
+};
+
+const API_BASE_URL = resolveApiBaseUrl();
 const CSRF_COOKIE_NAME = 'vaaniarc_csrf';
+const DEFAULT_CSRF_WAIT_TIMEOUT_MS = 3000;
+const DEFAULT_CSRF_WAIT_INTERVAL_MS = 50;
 
 const getCookieValue = (name) => {
   if (typeof document === 'undefined') {
@@ -26,6 +40,14 @@ const createIdempotencyKey = (prefix = "mutation") => {
   }
 
   return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const createApiError = (message, context = {}) => {
+  const error = new Error(message);
+  error.name = 'ApiError';
+  error.isApiError = true;
+  Object.assign(error, context);
+  return error;
 };
 
 class ApiService {
@@ -80,6 +102,39 @@ class ApiService {
     return this.deviceId;
   }
 
+  getCsrfToken() {
+    return getCookieValue(CSRF_COOKIE_NAME);
+  }
+
+  hasCsrfToken() {
+    return Boolean(this.getCsrfToken());
+  }
+
+  async waitForCsrfCookie(timeoutMs = DEFAULT_CSRF_WAIT_TIMEOUT_MS, intervalMs = DEFAULT_CSRF_WAIT_INTERVAL_MS) {
+    if (this.hasCsrfToken()) {
+      return this.getCsrfToken();
+    }
+
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, intervalMs);
+      });
+
+      const csrfToken = this.getCsrfToken();
+      if (csrfToken) {
+        return csrfToken;
+      }
+    }
+
+    throw createApiError('Your session is missing a CSRF token. Please refresh and sign in again.', {
+      category: 'session',
+      statusCode: 403,
+      endpoint: '/auth/csrf'
+    });
+  }
+
   // Generic API call method
   async apiCall(endpoint, options = {}) {
     const url = `${API_BASE_URL}${endpoint}`;
@@ -97,7 +152,11 @@ class ApiService {
       
       // Handle network errors
       if (!response) {
-        throw new Error('Network error: Unable to connect to server');
+        throw createApiError('Unable to connect to server.', {
+          category: 'network',
+          endpoint,
+          url
+        });
       }
 
       // Get response text first to handle empty or non-JSON responses
@@ -114,37 +173,103 @@ class ApiService {
         }
         // If it looks like HTML (server error page), show a cleaner message
         if (responseText?.includes('<!DOCTYPE') || responseText?.includes('<html')) {
-          throw new Error('Server is not responding correctly. Please check if the backend is running.');
+          throw createApiError('Server is not responding correctly. Please check if the backend is running.', {
+            category: 'server',
+            statusCode: response.status,
+            endpoint,
+            responseText
+          });
         }
-        throw new Error('Server error: Invalid response format');
+        throw createApiError('Server returned an invalid response format.', {
+          category: 'server',
+          statusCode: response.status,
+          endpoint,
+          responseText
+        });
       }
 
       if (!response.ok) {
+        const errorContext = {
+          statusCode: response.status,
+          endpoint,
+          responseBody: data,
+          responseText,
+          url
+        };
+
         // Handle specific error cases
         if (response.status === 401) {
-          throw new Error(
+          throw createApiError(
             data.message
             || (endpoint.includes('/auth/login') || endpoint.includes('/auth/register')
               ? 'Authentication failed.'
-              : 'Session expired. Please sign in again.')
+              : 'Session expired. Please sign in again.'),
+            {
+              ...errorContext,
+              category: endpoint.includes('/auth/login') || endpoint.includes('/auth/register')
+                ? 'auth'
+                : 'session'
+            }
           );
-        } else if (response.status === 403) {
-          throw new Error(data.message || 'Access denied.');
-        } else if (response.status === 404) {
-          throw new Error('Resource not found.');
-        } else if (response.status >= 500) {
-          throw new Error('Server error. Please try again later.');
         }
-        throw new Error(data.message || `HTTP error ${response.status}`);
+
+        if (response.status === 403) {
+          throw createApiError(data.message || 'Access denied.', {
+            ...errorContext,
+            category: /csrf/i.test(String(data?.message || '')) ? 'session' : 'auth'
+          });
+        }
+
+        if (response.status === 404) {
+          throw createApiError(data.message || 'Resource not found.', {
+            ...errorContext,
+            category: 'not_found'
+          });
+        }
+
+        if (response.status === 409) {
+          throw createApiError(data.message || 'That record already exists.', {
+            ...errorContext,
+            category: 'conflict'
+          });
+        }
+
+        if (response.status === 503) {
+          throw createApiError(
+            data.message || 'Server is still starting up. Please try again in a moment.',
+            {
+              ...errorContext,
+              category: data?.mongodb ? 'database' : 'server'
+            }
+          );
+        }
+
+        if (response.status >= 500) {
+          throw createApiError(data.message || 'Server error. Please try again later.', {
+            ...errorContext,
+            category: 'server'
+          });
+        }
+
+        throw createApiError(data.message || `HTTP error ${response.status}`, {
+          ...errorContext,
+          category: 'request'
+        });
       }
 
       return data;
     } catch (error) {
-      console.error('API Error:', error);
+      if (!error?.isApiError) {
+        console.error('API Error:', error);
+      }
       
       // Handle network connection errors
-      if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-        throw new Error('Unable to connect to server. Please check your internet connection.');
+      if (error?.message?.includes('Failed to fetch') || error?.message?.includes('NetworkError')) {
+        throw createApiError('Unable to connect to server. Please check the backend connection.', {
+          endpoint,
+          url,
+          category: 'network'
+        });
       }
       
       throw error;
@@ -187,6 +312,30 @@ class ApiService {
     return this.apiCall('/auth/change-password', {
       method: 'PUT',
       body: JSON.stringify(passwordData),
+    });
+  }
+
+  async getTwoFactorStatus() {
+    return this.apiCall('/2fa/status');
+  }
+
+  async setupTwoFactor() {
+    return this.apiCall('/2fa/setup', {
+      method: 'POST',
+    });
+  }
+
+  async enableTwoFactor(payload) {
+    return this.apiCall('/2fa/enable', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async disableTwoFactor(payload) {
+    return this.apiCall('/2fa/disable', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   }
 
@@ -563,6 +712,14 @@ class ApiService {
   // Verify token
   async verifyToken() {
     return this.apiCall('/auth/verify');
+  }
+
+  async getHealthStatus() {
+    return this.apiCall('/health');
+  }
+
+  async getHealthReadiness() {
+    return this.apiCall('/health/ready');
   }
 
   // Generic HTTP methods for flexibility

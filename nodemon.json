@@ -1,0 +1,20 @@
+{
+  "watch": [
+    "server",
+    ".env",
+    ".env.local",
+    "package.json",
+    "nodemon.json"
+  ],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [
+    "client/**",
+    "client/dist/**",
+    "dist/**",
+    "plans/**",
+    "uploads/**",
+    "README.md",
+    "TESTSPRITE.md",
+    "cryptography.md"
+  ]
+}

@@ -6,8 +6,14 @@ import LandingPage from "./components/LandingPage";
 import ChatHub from "./components/ChatHub";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Settings from "./components/Settings";
+import DeviceEncryptionResetModal from "./components/DeviceEncryptionResetModal";
 
-const LoadingScreen = () => (
+const LoadingScreen = ({
+  title = "VaaniArc",
+  message = "Connecting you to conversations...",
+  actionLabel = "",
+  onAction = null
+}) => (
   <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-900 to-slate-900 relative overflow-hidden">
     <div className="absolute inset-0 overflow-hidden">
       <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-gradient-to-r from-indigo-500/20 to-violet-500/20 rounded-full blur-3xl animate-pulse"></div>
@@ -19,8 +25,17 @@ const LoadingScreen = () => (
         <div className="w-16 h-16 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
       </div>
       <div className="space-y-4">
-        <h2 className="text-2xl font-bold text-white">VaaniArc</h2>
-        <p className="text-gray-300">Connecting you to conversations...</p>
+        <h2 className="text-2xl font-bold text-white">{title}</h2>
+        <p className="text-gray-300">{message}</p>
+        {onAction && actionLabel && (
+          <button
+            type="button"
+            onClick={onAction}
+            className="inline-flex items-center justify-center rounded-xl bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-400"
+          >
+            {actionLabel}
+          </button>
+        )}
         <div className="flex justify-center gap-2">
           <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
           <div className="w-2 h-2 bg-violet-500 rounded-full animate-bounce delay-100"></div>
@@ -32,20 +47,68 @@ const LoadingScreen = () => (
 );
 
 const ProtectedRoute = ({ children }) => {
-  const { isAuthenticated, isLoading } = useAuth();
+  const {
+    isAuthenticated,
+    isLoading,
+    sessionRestoreStatus,
+    sessionRestoreMessage,
+    retrySessionRestore
+  } = useAuth();
+
+  if (sessionRestoreStatus === "unavailable") {
+    return (
+      <LoadingScreen
+        title="Backend Unavailable"
+        message={sessionRestoreMessage || "The backend is still restarting."}
+        actionLabel="Retry Connection"
+        onAction={() => {
+          void retrySessionRestore();
+        }}
+      />
+    );
+  }
 
   if (isLoading) {
-    return <LoadingScreen />;
+    return (
+      <LoadingScreen
+        title={sessionRestoreStatus === "recovering" ? "Backend Recovering" : "VaaniArc"}
+        message={sessionRestoreMessage || "Connecting you to conversations..."}
+      />
+    );
   }
 
   return isAuthenticated ? children : <Navigate to="/auth" replace />;
 };
 
 const PublicOnlyRoute = ({ children }) => {
-  const { isAuthenticated, isLoading } = useAuth();
+  const {
+    isAuthenticated,
+    isLoading,
+    sessionRestoreStatus,
+    sessionRestoreMessage,
+    retrySessionRestore
+  } = useAuth();
+
+  if (sessionRestoreStatus === "unavailable") {
+    return (
+      <LoadingScreen
+        title="Backend Unavailable"
+        message={sessionRestoreMessage || "The backend is still restarting."}
+        actionLabel="Retry Connection"
+        onAction={() => {
+          void retrySessionRestore();
+        }}
+      />
+    );
+  }
 
   if (isLoading) {
-    return <LoadingScreen />;
+    return (
+      <LoadingScreen
+        title={sessionRestoreStatus === "recovering" ? "Backend Recovering" : "VaaniArc"}
+        message={sessionRestoreMessage || "Connecting you to conversations..."}
+      />
+    );
   }
 
   return isAuthenticated ? <Navigate to="/chat" replace /> : children;
@@ -108,6 +171,7 @@ function App() {
         <AuthProvider>
           <Suspense fallback={<LoadingScreen />}>
             <AppRoutes />
+            <DeviceEncryptionResetModal />
           </Suspense>
         </AuthProvider>
       </div>
