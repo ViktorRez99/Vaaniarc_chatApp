@@ -247,13 +247,13 @@ const Auth = () => {
     try {
       if (isLogin) {
         await login({
-          identifier: formData.email || formData.username,
+          identifier: formData.username,
           password: formData.password,
         })
       } else {
         await register({
-          username: formData.username,
-          email: formData.email,
+          username: formData.username.trim(),
+          email: formData.email.trim(),
           password: formData.password,
           firstName: formData.firstName,
           lastName: formData.lastName,
@@ -329,7 +329,7 @@ const Auth = () => {
           <div className="text-center mb-5">
             <h2 className="form-heading text-xl font-bold mb-1 text-white">{isLogin ? "Welcome Back" : "Join VaaniArc"}</h2>
             <p className="text-gray-400 text-sm">
-              {isLogin ? "Sign in to continue" : (step === 1 ? "Step 1: Personal Details" : "Step 2: Profile Setup")}
+              {isLogin ? "Sign in to continue" : (step === 1 ? "Step 1: Account Basics" : "Step 2: Profile Setup")}
             </p>
           </div>
 
@@ -367,14 +367,14 @@ const Auth = () => {
             {isLogin && (
               <>
                 <FormField
-                  label="Email or Username"
+                  label="Username or Email"
                   type="text"
-                  name="email"
-                  value={formData.email}
+                  name="username"
+                  value={formData.username}
                   onChange={handleInputChange}
-                  placeholder="Email or username"
+                  placeholder="Username or Email"
                   required
-                  icon="✉️"
+                  icon="👤"
                   compact={true}
                 />
                 <FormField

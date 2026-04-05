@@ -11,7 +11,8 @@ const {
 } = require('../middleware/auditLog');
 const {
   isValidEmail,
-  validatePassword
+  validatePassword,
+  validateUsername
 } = require('../utils/validation');
 const { parsePaginationLimit } = require('../utils/pagination');
 
@@ -35,9 +36,16 @@ router.post('/register', authLimiter, async (req, res) => {
     const normalizedEmail = normalizeOptionalEmail(email);
 
     // Validation
-    if (!normalizedUsername || !password) {
+    if (!normalizedUsername || !normalizedEmail || !password) {
       return res.status(400).json({ 
-        message: 'Username and password are required' 
+        message: 'Username, email, and password are required' 
+      });
+    }
+
+    const usernameValidation = validateUsername(normalizedUsername);
+    if (!usernameValidation.isValid) {
+      return res.status(400).json({
+        message: usernameValidation.error
       });
     }
 
@@ -48,13 +56,7 @@ router.post('/register', authLimiter, async (req, res) => {
       });
     }
 
-    if (normalizedUsername.length < 3 || normalizedUsername.length > 30) {
-      return res.status(400).json({ 
-        message: 'Username must be between 3 and 30 characters' 
-      });
-    }
-
-    if (normalizedEmail && !isValidEmail(normalizedEmail)) {
+    if (!isValidEmail(normalizedEmail)) {
       return res.status(400).json({
         message: 'Please enter a valid email'
       });
@@ -64,12 +66,12 @@ router.post('/register', authLimiter, async (req, res) => {
     const existingUser = await User.findOne({
       $or: [
         { username: normalizedUsername },
-        ...(normalizedEmail ? [{ email: normalizedEmail }] : [])
+        { email: normalizedEmail }
       ]
     });
 
     if (existingUser) {
-      if (normalizedEmail && existingUser.email === normalizedEmail) {
+      if (existingUser.email === normalizedEmail) {
         return res.status(409).json({ message: 'Email already registered' });
       }
       if (existingUser.username === normalizedUsername) {
@@ -80,7 +82,7 @@ router.post('/register', authLimiter, async (req, res) => {
     // Create new user
     const user = new User({
       username: normalizedUsername,
-      email: normalizedEmail || undefined,
+      email: normalizedEmail,
       password,
       bio: bio || '',
       firstName: firstName || '',
@@ -286,10 +288,11 @@ router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
     // Update username if provided and different
     if (username && username !== user.username) {
       const normalizedUsername = normalizeIdentifier(username);
+      const usernameValidation = validateUsername(normalizedUsername);
 
-      if (normalizedUsername.length < 3 || normalizedUsername.length > 30) {
-        return res.status(400).json({ 
-          message: 'Username must be between 3 and 30 characters' 
+      if (!usernameValidation.isValid) {
+        return res.status(400).json({
+          message: usernameValidation.error
         });
       }
 
@@ -310,23 +313,25 @@ router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
       const normalizedEmail = normalizeOptionalEmail(email);
       const currentEmail = user.email || null;
 
-      if (normalizedEmail && !isValidEmail(normalizedEmail)) {
+      if (!normalizedEmail) {
+        return res.status(400).json({ message: 'Email is required' });
+      }
+
+      if (!isValidEmail(normalizedEmail)) {
         return res.status(400).json({ message: 'Please enter a valid email' });
       }
 
       if (normalizedEmail !== currentEmail) {
-        if (normalizedEmail) {
-          const existingUser = await User.findOne({ 
-            email: normalizedEmail, 
-            _id: { $ne: user._id } 
-          });
-          
-          if (existingUser) {
-            return res.status(409).json({ message: 'Email already in use' });
-          }
-        }
+        const existingUser = await User.findOne({ 
+          email: normalizedEmail, 
+          _id: { $ne: user._id } 
+        });
         
-        user.email = normalizedEmail || undefined;
+        if (existingUser) {
+          return res.status(409).json({ message: 'Email already in use' });
+        }
+
+        user.email = normalizedEmail;
       }
     }
 

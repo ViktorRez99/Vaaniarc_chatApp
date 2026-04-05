@@ -43,13 +43,26 @@ describe('VaaniArc API', () => {
         .post('/api/auth/register')
         .send({
           username: 'validuser',
+          email: 'valid@example.com',
           password: '12345'
         })
         .expect(400);
       expect(String(res.body.message).toLowerCase()).toMatch(/password|6/);
     });
 
-    it('POST /api/auth/register rejects invalid optional email', async () => {
+    it('POST /api/auth/register rejects missing email', async () => {
+      const res = await request(app)
+        .post('/api/auth/register')
+        .send({
+          username: 'validuser',
+          password: 'StrongPass123!'
+        })
+        .expect(400);
+
+      expect(String(res.body.message).toLowerCase()).toMatch(/email/);
+    });
+
+    it('POST /api/auth/register rejects invalid email', async () => {
       const res = await request(app)
         .post('/api/auth/register')
         .send({

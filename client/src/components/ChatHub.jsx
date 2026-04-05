@@ -204,18 +204,6 @@ const ChatHub = () => {
                     
                     <div className="border-t border-white/10 my-1"></div>
                     
-                    <button className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none">
-                      <div className="w-7 h-7 rounded-full bg-green-500/10 flex items-center justify-center group-hover:bg-green-500/20 transition-colors">
-                        <span className="text-green-400 font-bold text-xs">W</span>
-                      </div>
-                      <span className="font-medium">Share to WhatsApp</span>
-                    </button>
-                    <button className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none">
-                      <div className="w-7 h-7 rounded-full bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors">
-                        <span className="text-blue-400 font-bold text-xs">T</span>
-                      </div>
-                      <span className="font-medium">Share to Telegram</span>
-                    </button>
                   </div>
                 )}
               </div>
@@ -257,7 +245,7 @@ const ChatHub = () => {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="font-semibold text-slate-100 truncate text-sm">{user?.username}</p>
-                          <p className="text-xs text-slate-400 truncate">{user?.email}</p>
+                          <p className="text-xs text-slate-400 truncate">@{user?.username}</p>
                         </div>
                       </div>
                     </div>
@@ -335,23 +323,6 @@ const ChatHub = () => {
                           </div>
                         )}
                       </div>
-
-                      <div className="border-t border-white/10 my-1"></div>
-                      <div className="px-4 py-1.5">
-                        <p className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">Connect</p>
-                      </div>
-                      <button className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none">
-                        <div className="w-7 h-7 rounded-full bg-green-500/10 flex items-center justify-center group-hover:bg-green-500/20 transition-colors">
-                          <span className="text-green-400 font-bold text-xs">W</span>
-                        </div>
-                        <span className="font-medium">Link WhatsApp</span>
-                      </button>
-                      <button className="w-full flex items-center space-x-3 px-4 py-2 text-slate-200 hover:bg-white/10 transition-all text-sm group bg-transparent border-none">
-                        <div className="w-7 h-7 rounded-full bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors">
-                          <span className="text-blue-400 font-bold text-xs">T</span>
-                        </div>
-                        <span className="font-medium">Link Telegram</span>
-                      </button>
 
                       <div className="border-t border-white/10 my-1"></div>
                       <button

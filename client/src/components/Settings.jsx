@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import apiService from '../services/api';
 import {
   disablePushNotifications,
   getPushStatus,
   syncPushSubscription
 } from '../services/notifications';
 import { PASSWORD_POLICY, validatePassword } from '../utils/passwordPolicy';
+
+const isValidEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
 export default function Settings() {
   const navigate = useNavigate();
@@ -56,10 +57,7 @@ export default function Settings() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [notifications, setNotifications] = useState({
-    push: true,
-    email: true,
-    messages: true,
-    meetings: false
+    push: true
   });
   const [pushStatus, setPushStatus] = useState({
     supported: false,
@@ -277,8 +275,16 @@ export default function Settings() {
       setError('Username is required!');
       return;
     }
-    if (!formData.email.trim() || !formData.email.includes('@')) {
-      setError('Valid email is required!');
+
+    const trimmedEmail = formData.email.trim();
+
+    if (!trimmedEmail) {
+      setError('Email is required!');
+      return;
+    }
+
+    if (!isValidEmail(trimmedEmail)) {
+      setError('Please enter a valid email address!');
       return;
     }
 
@@ -289,10 +295,14 @@ export default function Settings() {
     try {
       await updateProfile({
         ...formData,
+        email: trimmedEmail,
         avatar: avatarUrl // Include avatar if it was changed
       });
-      
-      setSavedData({...formData});
+
+      setSavedData({
+        ...formData,
+        email: trimmedEmail
+      });
       setSuccess('Profile updated successfully!');
       setIsEditing(false);
     } catch (err) {
@@ -323,14 +333,6 @@ export default function Settings() {
   };
 
   const toggleNotification = async (key) => {
-    if (key !== 'push') {
-      setNotifications((prev) => ({
-        ...prev,
-        [key]: !prev[key]
-      }));
-      return;
-    }
-
     setPushToggleLoading(true);
     setError('');
     setSuccess('');
@@ -608,8 +610,9 @@ export default function Settings() {
                 type="email"
                 value={formData.email}
                 onChange={(e) => setFormData({...formData, email: e.target.value})}
+                required
                 className="w-full px-5 py-3.5 bg-white/5 border border-white/10 rounded-2xl text-white font-medium placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all backdrop-blur-sm"
-                placeholder="your.email@example.com"
+                placeholder="name@example.com"
               />
             </div>
             <div className="space-y-2">
@@ -669,7 +672,7 @@ export default function Settings() {
               <div className="grid grid-cols-2 gap-6 mb-6">
                 <div className="group">
                   <div className="text-[10px] text-slate-400 mb-1 font-bold uppercase tracking-wider group-hover:text-indigo-300 transition-colors">Email</div>
-                  <div className="text-sm text-white font-medium break-all">{savedData.email}</div>
+                  <div className="text-sm text-white font-medium">{savedData.email || 'Not set'}</div>
                 </div>
                 <div className="group">
                   <div className="text-[10px] text-slate-400 mb-1 font-bold uppercase tracking-wider group-hover:text-indigo-300 transition-colors">Phone</div>
@@ -1359,7 +1362,7 @@ export default function Settings() {
             </div>
             <div>
               <p className="text-sm text-slate-300 font-medium">
-                Tune how often we notify you. You can turn channels on or off anytime.
+                Browser push is the only notification channel available in this build.
               </p>
             </div>
           </div>
@@ -1423,177 +1426,6 @@ export default function Settings() {
               </div>
             </button>
 
-            {/* Email Notifications */}
-            <button
-              type="button"
-              onClick={() => toggleNotification('email')}
-              className={`w-full flex items-center justify-between p-5 rounded-2xl border transition-all duration-300 transform hover:scale-[1.01] group ${
-                notifications.email
-                  ? 'bg-sky-500/10 backdrop-blur-xl border-sky-500/30 shadow-lg shadow-sky-500/10'
-                  : 'bg-white/5 backdrop-blur-xl border-white/10 hover:border-sky-400/30 hover:bg-white/10'
-              }`}
-            >
-              <div className="flex items-start gap-4">
-                <div className="mt-1 w-10 h-10 rounded-xl bg-sky-500/20 backdrop-blur-sm flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
-                  <svg className="w-5 h-5 text-sky-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-                    />
-                  </svg>
-                </div>
-                <div className="text-left">
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className={`text-base font-bold ${notifications.email ? 'text-white' : 'text-slate-300'}`}>
-                      Email Notifications
-                    </div>
-                    <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-800/50 backdrop-blur-sm text-slate-300 border border-white/10">
-                      Email
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-400 font-medium">
-                    {notifications.email
-                      ? 'We will send summaries and important updates to your email.'
-                      : 'You will not receive emails from us.'}
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-col items-end gap-2">
-                <div
-                  className={`px-2.5 py-1 text-[10px] font-bold rounded-full transition-colors ${
-                    notifications.email ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-700/50 text-slate-400 border border-white/10'
-                  }`}
-                >
-                  {notifications.email ? 'On' : 'Off'}
-                </div>
-                <div
-                  className={`w-12 h-6 rounded-full relative transition-all duration-300 ${
-                    notifications.email ? 'bg-sky-500 shadow-[0_0_10px_rgba(14,165,233,0.4)]' : 'bg-slate-700/50'
-                  }`}
-                >
-                  <div
-                    className={`w-5 h-5 bg-white rounded-full absolute top-0.5 transition-all duration-300 shadow-sm ${
-                      notifications.email ? 'right-0.5' : 'left-0.5 bg-slate-400'
-                    }`}
-                  ></div>
-                </div>
-              </div>
-            </button>
-
-            {/* Message Notifications */}
-            <button
-              type="button"
-              onClick={() => toggleNotification('messages')}
-              className={`w-full flex items-center justify-between p-5 rounded-2xl border transition-all duration-300 transform hover:scale-[1.01] group ${
-                notifications.messages
-                  ? 'bg-emerald-500/10 backdrop-blur-xl border-emerald-500/30 shadow-lg shadow-emerald-500/10'
-                  : 'bg-white/5 backdrop-blur-xl border-white/10 hover:border-emerald-400/30 hover:bg-white/10'
-              }`}
-            >
-              <div className="flex items-start gap-4">
-                <div className="mt-1 w-10 h-10 rounded-xl bg-emerald-500/20 backdrop-blur-sm flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
-                  <svg className="w-5 h-5 text-emerald-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M8 10h.01M12 10h.01M16 10h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4-.8L3 20l1.3-3.9A7.42 7.42 0 013 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"
-                    />
-                  </svg>
-                </div>
-                <div className="text-left">
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className={`text-base font-bold ${notifications.messages ? 'text-white' : 'text-slate-300'}`}>
-                      Message Notifications
-                    </div>
-                    <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-800/50 backdrop-blur-sm text-slate-300 border border-white/10">
-                      Chats
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-400 font-medium">
-                    {notifications.messages
-                      ? 'You will be alerted when you receive new messages.'
-                      : 'Chat notifications are muted.'}
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-col items-end gap-2">
-                <div
-                  className={`px-2.5 py-1 text-[10px] font-bold rounded-full transition-colors ${
-                    notifications.messages ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-700/50 text-slate-400 border border-white/10'
-                  }`}
-                >
-                  {notifications.messages ? 'On' : 'Off'}
-                </div>
-                <div
-                  className={`w-12 h-6 rounded-full relative transition-all duration-300 ${
-                    notifications.messages ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.4)]' : 'bg-slate-700/50'
-                  }`}
-                >
-                  <div
-                    className={`w-5 h-5 bg-white rounded-full absolute top-0.5 transition-all duration-300 shadow-sm ${
-                      notifications.messages ? 'right-0.5' : 'left-0.5 bg-slate-400'
-                    }`}
-                  ></div>
-                </div>
-              </div>
-            </button>
-
-            {/* Meeting Reminders */}
-            <button
-              type="button"
-              onClick={() => toggleNotification('meetings')}
-              className={`w-full flex items-center justify-between p-5 rounded-2xl border transition-all duration-300 transform hover:scale-[1.01] group ${
-                notifications.meetings
-                  ? 'bg-amber-500/10 backdrop-blur-xl border-amber-500/30 shadow-lg shadow-amber-500/10'
-                  : 'bg-white/5 backdrop-blur-xl border-white/10 hover:border-amber-400/30 hover:bg-white/10'
-              }`}
-            >
-              <div className="flex items-start gap-4">
-                <div className="mt-1 w-10 h-10 rounded-xl bg-amber-500/20 backdrop-blur-sm flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
-                  <svg className="w-5 h-5 text-amber-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3M5 11h14M5 19h14M5 5h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2z" />
-                  </svg>
-                </div>
-                <div className="text-left">
-                  <div className="flex items-center gap-2 mb-1">
-                    <div className={`text-base font-bold ${notifications.meetings ? 'text-white' : 'text-slate-300'}`}>
-                      Meeting Reminders
-                    </div>
-                    <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-slate-800/50 backdrop-blur-sm text-slate-300 border border-white/10">
-                      Calendar
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-400 font-medium">
-                    {notifications.meetings
-                      ? 'We will remind you before your scheduled meetings.'
-                      : 'Meeting reminders are turned off.'}
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-col items-end gap-2">
-                <div
-                  className={`px-2.5 py-1 text-[10px] font-bold rounded-full transition-colors ${
-                    notifications.meetings ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-700/50 text-slate-400 border border-white/10'
-                  }`}
-                >
-                  {notifications.meetings ? 'On' : 'Off'}
-                </div>
-                <div
-                  className={`w-12 h-6 rounded-full relative transition-all duration-300 ${
-                    notifications.meetings ? 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.4)]' : 'bg-slate-700/50'
-                  }`}
-                >
-                  <div
-                    className={`w-5 h-5 bg-white rounded-full absolute top-0.5 transition-all duration-300 shadow-sm ${
-                      notifications.meetings ? 'right-0.5' : 'left-0.5 bg-slate-400'
-                    }`}
-                  ></div>
-                </div>
-              </div>
-            </button>
           </div>
 
           {/* Notification Summary Panel */}
@@ -1608,7 +1440,7 @@ export default function Settings() {
                 <div>
                   <div className="text-base font-bold text-white">Notification Summary</div>
                   <div className="text-xs text-slate-400 font-medium">
-                    {enabledCount} of 4 channels enabled
+                    {enabledCount} of 1 delivery channel enabled
                   </div>
                 </div>
               </div>
@@ -1622,18 +1454,6 @@ export default function Settings() {
             <div className="mt-4 flex gap-2 flex-wrap">
               {notifications.push && (                  <span className="px-3 py-1.5 text-[11px] font-bold bg-indigo-500/20 backdrop-blur-sm text-indigo-300 rounded-lg border border-indigo-500/30">
                   Push
-                </span>
-              )}
-              {notifications.email && (                  <span className="px-3 py-1.5 text-[11px] font-bold bg-sky-500/20 backdrop-blur-sm text-sky-300 rounded-lg border border-sky-500/30">
-                  Email
-                </span>
-              )}
-              {notifications.messages && (                  <span className="px-3 py-1.5 text-[11px] font-bold bg-emerald-500/20 backdrop-blur-sm text-emerald-300 rounded-lg border border-emerald-500/30">
-                  Messages
-                </span>
-              )}
-              {notifications.meetings && (                  <span className="px-3 py-1.5 text-[11px] font-bold bg-amber-500/20 backdrop-blur-sm text-amber-300 rounded-lg border border-amber-500/30">
-                  Meetings
                 </span>
               )}
             </div>
