@@ -319,6 +319,72 @@ class ApiService {
     return this.apiCall('/2fa/status');
   }
 
+  async getWebAuthnRegistrationOptions(payload = {}) {
+    return this.apiCall('/auth/webauthn/register/options', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async verifyWebAuthnRegistration(payload) {
+    return this.apiCall('/auth/webauthn/register/verify', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getWebAuthnAuthenticationOptions(payload = {}) {
+    return this.apiCall('/auth/webauthn/authenticate/options', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async verifyWebAuthnAuthentication(payload) {
+    return this.apiCall('/auth/webauthn/authenticate/verify', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async listPasskeys() {
+    return this.apiCall('/auth/webauthn/credentials');
+  }
+
+  async revokePasskey(passkeyId) {
+    return this.apiCall(`/auth/webauthn/credentials/${passkeyId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async listRecoveryKits() {
+    return this.apiCall('/auth/recovery/kits');
+  }
+
+  async createRecoveryKit(payload) {
+    return this.apiCall('/auth/recovery/kits', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async rotateRecoveryKit(kitId, payload) {
+    return this.apiCall(`/auth/recovery/kits/${kitId}/rotate`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async revokeRecoveryKit(kitId) {
+    return this.apiCall(`/auth/recovery/kits/${kitId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async getReceivedRecoveryShares() {
+    return this.apiCall('/auth/recovery/received');
+  }
+
   async setupTwoFactor() {
     return this.apiCall('/2fa/setup', {
       method: 'POST',
@@ -362,6 +428,10 @@ class ApiService {
     return this.apiCall(url);
   }
 
+  async getPinnedChatMessages(chatId) {
+    return this.apiCall(`/chats/${chatId}/messages/pinned`);
+  }
+
   async sendChatMessage(chatId, messageData) {
     return this.apiCall(`/chats/${chatId}/messages`, {
       method: 'POST',
@@ -378,6 +448,16 @@ class ApiService {
   async markChatMessagesRead(chatId) {
     return this.apiCall(`/chats/${chatId}/messages/read`, {
       method: 'PATCH',
+    });
+  }
+
+  async updateChatMessagePin(messageId, isPinned) {
+    return this.apiCall(`/chat/messages/${messageId}/pin`, {
+      method: 'PATCH',
+      headers: {
+        'X-Idempotency-Key': createIdempotencyKey('message-pin')
+      },
+      body: JSON.stringify({ isPinned }),
     });
   }
 
@@ -460,6 +540,10 @@ class ApiService {
     return this.apiCall(url);
   }
 
+  async getPinnedRoomMessages(roomId) {
+    return this.apiCall(`/rooms/${roomId}/messages/pinned`);
+  }
+
   async sendRoomMessage(roomId, messageData) {
     return this.apiCall(`/rooms/${roomId}/messages`, {
       method: 'POST',
@@ -481,6 +565,13 @@ class ApiService {
 
   async getRoomStats(roomId) {
     return this.apiCall(`/rooms/${roomId}/stats`);
+  }
+
+  async updateRoomMessagePin(roomId, messageId, isPinned) {
+    return this.apiCall(`/rooms/${roomId}/messages/${messageId}/pin`, {
+      method: 'PATCH',
+      body: JSON.stringify({ isPinned }),
+    });
   }
 
   async getDevices() {

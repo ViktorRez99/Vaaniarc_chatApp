@@ -1,6 +1,6 @@
 # VaaniArc
 
-VaaniArc is a real-time chat and collaboration application built with React, Vite, Node.js, Express, Socket.IO, and MongoDB. It supports account management, public and private messaging, rooms, meetings, device-aware encryption flows, and push-based realtime updates.
+VaaniArc is a web-first real-time chat and collaboration application built with React, Vite, Node.js, Express, Socket.IO, MongoDB, and Redis-ready infrastructure. It supports account management, public and private messaging, rooms, meetings, passkeys, TOTP, encrypted recovery-kit escrow, device-aware encryption flows, and push-based realtime updates.
 
 ## Workflow Diagram
 
@@ -56,8 +56,9 @@ VaaniArc is packed with foundational and advanced features designed for seamless
 - **Meetings & Audio/Video Collaboration:** Built-in meeting interfaces for team collaboration.
 - **End-to-End Encryption (E2EE):** Secure messaging with device-aware encryption payloads and continuous key management.
 - **Key Transparency:** Advanced cryptographic guarantees making sure public keys haven't been tampered with.
-- **Advanced Authentication:** Multi-step registration flows, Two-Factor Authentication (2FA), and secure JWT session management.
+- **Advanced Authentication:** Password login fallback, passkey/WebAuthn support, TOTP-based 2FA, and secure cookie session management.
 - **Multi-Device Handling:** Native support for managing active sessions and device-specific keys across multiple platforms simultaneously.
+- **Encrypted Social Recovery:** Recovery kits use Shamir secret sharing in the client and store only encrypted shard envelopes on the server.
 - **File Uploads & Sharing:** Secure file transmission, access control, and size validation mechanisms.
 - **Message Reliability:** Built-in message and operation idempotency, preventing duplicate messages upon network drops, plus optimistic locking for concurrent database operations.
 - **Web Push Notifications:** Native push-based realtime alerts ensuring users are notified of events even when tab is out of focus.
@@ -124,7 +125,7 @@ Create a root `.env` file:
 ```env
 PORT=3000
 NODE_ENV=development
-CLIENT_URL=http://127.0.0.1:5173
+CLIENT_URL=http://localhost:5173
 MONGODB_URI=mongodb://127.0.0.1:27017/chatapp
 JWT_SECRET=replace_this_with_a_strong_secret
 JWT_EXPIRES_IN=7d
@@ -141,8 +142,24 @@ npm run dev:full
 
 Default local URLs:
 
-- Frontend: `http://127.0.0.1:5173`
-- Backend: `http://127.0.0.1:3000`
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:3000`
+
+### Local Parity Stack
+
+For local MongoDB + Redis parity with the production topology:
+
+```bash
+docker compose up -d
+```
+
+Then use:
+
+```env
+MONGODB_URI=mongodb://127.0.0.1:27017/chatapp
+REDIS_URL=redis://127.0.0.1:6379
+FRONTEND_URL=http://localhost:5173
+```
 
 ## Project Structure
 
@@ -173,10 +190,11 @@ vaaniArc/
 ## Key Runtime Flow
 
 1. Users authenticate from the React frontend.
-2. The frontend sends REST requests for auth, profile, chat, room, upload, and device actions.
-3. The backend validates requests and persists data in MongoDB.
-4. Socket.IO carries realtime chat, presence, and event updates back to connected clients.
-5. Push notifications are delivered through Web Push when supported.
+2. The frontend can authenticate with password or passkey, then bootstraps device-bound encryption in the background.
+3. The frontend sends REST requests for auth, profile, recovery kits, chat, room, upload, and device actions.
+4. The backend validates requests, stores only encrypted recovery shards for social recovery, and persists state in MongoDB.
+5. Socket.IO carries realtime chat, presence, and event updates back to connected clients.
+6. Push notifications are delivered through the service worker and Web Push when supported.
 
 ## Project Team & Contributions
 

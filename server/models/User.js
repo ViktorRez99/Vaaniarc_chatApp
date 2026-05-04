@@ -132,7 +132,9 @@ const cleanupUserRelationships = async (userId) => {
     ChannelPost,
     Community,
     TwoFactor,
-    KeyTransparencyEntry
+    KeyTransparencyEntry,
+    PasskeyCredential,
+    RecoveryKit
   ] = [
     mongoose.model('Session'),
     mongoose.model('Device'),
@@ -144,7 +146,9 @@ const cleanupUserRelationships = async (userId) => {
     mongoose.model('ChannelPost'),
     mongoose.model('Community'),
     mongoose.model('TwoFactor'),
-    mongoose.model('KeyTransparencyEntry')
+    mongoose.model('KeyTransparencyEntry'),
+    mongoose.model('PasskeyCredential'),
+    mongoose.model('RecoveryKit')
   ];
 
   const userSessions = await Session.find({ user: userId }).select('tokenHash').lean();
@@ -162,6 +166,8 @@ const cleanupUserRelationships = async (userId) => {
     Device.deleteMany({ user: userId }),
     TwoFactor.deleteMany({ user: userId }),
     KeyTransparencyEntry.deleteMany({ user: userId }),
+    PasskeyCredential.deleteMany({ user: userId }),
+    RecoveryKit.deleteMany({ user: userId }),
     privateChatIds.length ? PrivateMessage.deleteMany({ chatId: { $in: privateChatIds } }) : Promise.resolve(),
     privateChatIds.length ? Chat.deleteMany({ _id: { $in: privateChatIds } }) : Promise.resolve(),
     PrivateMessage.updateMany(

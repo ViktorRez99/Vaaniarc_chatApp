@@ -47,7 +47,7 @@ router.get('/meetings', async (req, res) => {
 
     const meetings = await Meeting.find(query)
       .populate('host', 'username avatar')
-      .populate('participants.user', 'username avatar')
+      .populate('participants.user', 'username avatar firstName lastName')
       .sort({ createdAt: -1 });
 
     res.json(meetings);
@@ -64,7 +64,7 @@ router.get('/meetings/:meetingId', async (req, res) => {
 
     const meeting = await Meeting.findOne({ meetingId })
       .populate('host', 'username avatar')
-      .populate('participants.user', 'username avatar status');
+      .populate('participants.user', 'username avatar status firstName lastName');
 
     if (!meeting) {
       return res.status(404).json({ message: 'Meeting not found' });

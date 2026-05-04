@@ -5,6 +5,7 @@ const { normalizeId } = require('../utils/idHelpers');
 const logger = require('../utils/logger');
 
 let isConfigured = false;
+let invalidConfigurationWarningLogged = false;
 
 const getVapidConfig = () => ({
   publicKey: process.env.WEB_PUSH_VAPID_PUBLIC_KEY || null,
@@ -22,9 +23,21 @@ const ensureConfigured = () => {
     return false;
   }
 
-  webpush.setVapidDetails(subject, publicKey, privateKey);
-  isConfigured = true;
-  return true;
+  try {
+    webpush.setVapidDetails(subject, publicKey, privateKey);
+    isConfigured = true;
+    invalidConfigurationWarningLogged = false;
+    return true;
+  } catch (error) {
+    if (!invalidConfigurationWarningLogged) {
+      logger.warn('Web push VAPID configuration is invalid; push notifications disabled', {
+        message: error.message
+      });
+      invalidConfigurationWarningLogged = true;
+    }
+    isConfigured = false;
+    return false;
+  }
 };
 
 const hasPushConfiguration = () => ensureConfigured();

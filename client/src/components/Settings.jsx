@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import PasskeysPanel from './PasskeysPanel';
+import RecoveryKitPanel from './RecoveryKitPanel';
 import RuntimeStatusBanner from './RuntimeStatusBanner';
 import apiService from '../services/api';
 import {
@@ -978,6 +980,10 @@ export default function Settings() {
             )}
           </div>
 
+          <PasskeysPanel />
+
+          <RecoveryKitPanel />
+
           {/* Two-Factor Authentication Toggle */}
           <div className="flex items-center justify-between p-6 rounded-2xl bg-emerald-500/5 backdrop-blur-xl border border-emerald-500/10 hover:border-emerald-500/30 transition-all group hover:bg-emerald-500/10">
             <div className="flex items-center gap-5">
@@ -1829,130 +1835,109 @@ export default function Settings() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-transparent" style={{ fontFamily: getFontFamily() }}>
-      {/* Background Gradients */}
-      <div className="fixed inset-0 overflow-hidden -z-10 pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] rounded-full bg-indigo-500/10 blur-[120px]"></div>
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] rounded-full bg-violet-500/10 blur-[120px]"></div>
-      </div>
-
-      {/* Avatar Modal */}
+    <div className="flex flex-col h-screen overflow-hidden" style={{ background: 'var(--bg-base)', fontFamily: 'var(--font-body)' }}>
       {showAvatarModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900/80 backdrop-blur-3xl rounded-[2rem] p-8 max-w-2xl w-full max-h-screen overflow-y-auto border border-white/10 shadow-2xl ring-1 ring-white/5">
+        <div className="fixed inset-0 flex items-center justify-center z-50 p-4" style={{ background: 'rgba(5,5,7,0.85)', backdropFilter: 'var(--glass-blur)' }}>
+          <div className="rounded-lg p-6 max-w-2xl w-full max-h-screen overflow-y-auto border border-bd" style={{ background: 'var(--bg-panel)' }}>
             <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold text-white">Edit Avatar</h2>
+              <h2 className="text-lg font-display font-semibold text-tx-primary tracking-tight">Edit Avatar</h2>
               <button
                 onClick={() => setShowAvatarModal(false)}
-                className="text-slate-400 hover:text-white transition-colors p-2 hover:bg-white/10 rounded-full"
+                className="text-tx-muted hover:text-tx-primary transition-colors-fast p-1 cursor-pointer bg-transparent border-none"
               >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
-
-            <div className="mb-8">
-              <h3 className="text-sm font-bold text-slate-300 mb-4 uppercase tracking-wider">Choose an avatar</h3>
-              <div className="grid grid-cols-4 gap-4">
+            <div className="mb-6">
+              <h3 className="text-xs font-mono uppercase tracking-widest text-tx-muted mb-3">Choose an avatar</h3>
+              <div className="grid grid-cols-4 gap-3">
                 {avatarOptions.map((avatar, index) => (
                   <button
                     key={index}
                     onClick={() => handleSelectAvatar(avatar)}
-                    className="aspect-square rounded-2xl overflow-hidden border border-white/10 hover:border-indigo-500/50 transition-all hover:scale-105 backdrop-blur-xl bg-white/5 hover:bg-white/10"
+                    className="aspect-square rounded-lg overflow-hidden border border-bd hover:border-bd-accent transition-colors-fast cursor-pointer"
+                    style={{ background: 'var(--bg-card)' }}
                   >
                     <img src={avatar} alt={`Avatar ${index + 1}`} className="w-full h-full object-cover" />
                   </button>
                 ))}
               </div>
             </div>
-
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 rounded-2xl transition-all mb-3 font-bold border border-indigo-500/30 hover:scale-[1.02] active:scale-[0.98]"
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-md text-xs font-ui font-medium transition-colors-fast cursor-pointer border border-bd-accent bg-accent-dim text-accent hover:bg-accent/20 mb-2"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
               </svg>
-              <span className="font-bold">Upload Picture</span>
+              Upload Picture
             </button>
-
             {avatarUrl && (
               <button
                 onClick={handleRemoveAvatar}
-                className="w-full flex items-center justify-center gap-3 px-6 py-4 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-2xl transition-all border border-red-500/20 font-bold hover:scale-[1.02] active:scale-[0.98]"
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-md text-xs font-ui font-medium transition-colors-fast cursor-pointer border bg-transparent text-danger hover:bg-danger/10"
+                style={{ borderColor: 'rgba(255,68,102,0.25)' }}
               >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                 </svg>
-                <span className="font-bold">Remove Picture</span>
+                Remove Picture
               </button>
             )}
           </div>
         </div>
       )}
 
-      <div className="flex-shrink-0 bg-slate-900/40 backdrop-blur-2xl border-b border-white/10 z-10">
-        <div className="flex items-center justify-between p-6 max-w-7xl mx-auto w-full">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-violet-600/20 border border-white/10 flex items-center justify-center shadow-lg">
-              <svg className="w-6 h-6 text-indigo-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-white tracking-tight">Settings</h1>
-              <p className="text-sm text-slate-400 font-medium">Manage your account and preferences</p>
-            </div>
-          </div>
+      <div className="flex-shrink-0 border-b border-bd-subtle z-10" style={{ background: 'var(--bg-panel)' }}>
+        <div className="flex items-center gap-3 h-14 px-6 max-w-7xl mx-auto w-full">
+          <svg className="w-5 h-5 text-tx-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+          <h1 className="text-sm font-display font-semibold text-tx-primary tracking-tight">Settings</h1>
+          <span className="text-xs font-ui text-tx-muted">Manage your account and preferences</span>
         </div>
       </div>
 
       <div className="flex-1 flex overflow-hidden max-w-7xl mx-auto w-full">
-        <div className="w-64 p-4 hidden md:block">
-          <nav className="space-y-1 bg-slate-900/20 backdrop-blur-xl border border-white/5 rounded-2xl p-2">
+        <div className="w-56 p-3 hidden md:block shrink-0">
+          <nav className="space-y-0.5 rounded-lg border border-bd-subtle p-1.5" style={{ background: 'var(--bg-panel)' }}>
             {sections.map((section) => (
               <button
                 key={section.id}
                 onClick={() => setActiveSection(section.id)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 text-left rounded-xl transition-all duration-300 group ${
+                className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left rounded-md transition-colors-fast cursor-pointer border-none ${
                   activeSection === section.id
-                    ? "bg-white/10 text-white shadow-lg backdrop-blur-md border border-white/10"
-                    : "text-slate-400 hover:bg-white/5 hover:text-white border border-transparent"
+                    ? "bg-selected text-tx-primary"
+                    : "bg-transparent text-tx-muted hover:bg-hover hover:text-tx-secondary"
                 }`}
               >
-                <div className={`p-1.5 rounded-lg transition-colors ${
-                  activeSection === section.id ? "bg-indigo-500/20 text-indigo-300" : "bg-white/5 group-hover:bg-white/10"
-                }`}>
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={section.icon} />
-                  </svg>
-                </div>
-                <span className="text-sm font-bold">{section.name}</span>
+                <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d={section.icon} />
+                </svg>
+                <span className="text-xs font-ui font-medium">{section.name}</span>
                 {activeSection === section.id && (
-                  <div className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.8)]"></div>
+                  <div className="ml-auto w-1 h-1 rounded-full bg-accent" style={{ boxShadow: 'var(--accent-glow)' }} />
                 )}
               </button>
             ))}
-
-            <div className="pt-2 mt-2 border-t border-white/5">
+            <div className="pt-1.5 mt-1.5 border-t border-bd-subtle">
               <button
                 onClick={handleSignOut}
-                className="w-full flex items-center gap-3 px-3 py-2.5 text-left rounded-xl transition-all duration-300 text-rose-400 hover:bg-rose-500/10 hover:text-rose-300 border border-transparent hover:border-rose-500/20 group"
+                className="w-full flex items-center gap-2.5 px-2.5 py-2 text-left rounded-md transition-colors-fast text-danger hover:bg-danger/10 cursor-pointer border-none bg-transparent"
               >
-                <div className="p-1.5 rounded-lg bg-rose-500/10 group-hover:bg-rose-500/20 transition-colors">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-                  </svg>
-                </div>
-                <span className="text-sm font-bold">Sign Out</span>
+                <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                <span className="text-xs font-ui font-medium">Sign Out</span>
               </button>
             </div>
           </nav>
         </div>
 
-        <div className="flex-1 p-6 overflow-y-auto custom-scrollbar">
+        <div className="flex-1 p-4 overflow-y-auto">
           <div className="max-w-3xl mx-auto pb-10">
             <RuntimeStatusBanner className="mb-6" />
             {renderContent()}

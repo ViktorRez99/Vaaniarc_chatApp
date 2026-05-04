@@ -15,12 +15,17 @@ const {
   sendNotificationsToUserIds
 } = require('../services/pushService');
 const { emitSocketEvent } = require('../utils/socketPayloads');
+const { normalizeForwardedFrom } = require('../utils/forwardedMessage');
 const {
   buildActiveMessageQuery,
   buildPrivacyFields,
   markViewOnceConsumed,
-  redactRoomMessageForUser
 } = require('../utils/messagePrivacy');
+const {
+  populateRoomMessage,
+  serializeRoomMessageForUser,
+  serializeRoomMessagesForUser
+} = require('../utils/roomMessageFormatting');
 const {
   resolveStoredTextContent
 } = require('../utils/secureMessaging');
@@ -519,16 +524,51 @@ router.get('/rooms/:roomId/messages', async (req, res) => {
       });
     }
 
-    const messages = await Message.find(query)
-      .populate('sender', 'username avatar')
-      .populate('replyTo', 'content sender')
-      .sort({ createdAt: -1 })
-      .limit(safeLimit);
+    const messages = await populateRoomMessage(
+      Message.find(query)
+        .sort({ createdAt: -1 })
+        .limit(safeLimit)
+    );
 
-    res.json(messages.reverse().map((message) => redactRoomMessageForUser(message, userId)));
+    res.json(serializeRoomMessagesForUser(messages.reverse(), userId));
   } catch (error) {
     console.error('Error fetching room messages:', error);
     res.status(500).json({ message: 'Failed to fetch room messages' });
+  }
+});
+
+router.get('/rooms/:roomId/messages/pinned', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const userId = req.user._id;
+
+    const room = await Room.findById(roomId);
+    if (!room || !room.isActive) {
+      return res.status(404).json({ message: 'Room not found' });
+    }
+
+    if (!room.isMember(userId)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const query = buildActiveMessageQuery({
+      room: roomId,
+      isDeleted: false,
+      isPinned: true
+    });
+
+    const messages = await populateRoomMessage(
+      Message.find(query)
+        .sort({ pinnedAt: -1, createdAt: -1 })
+        .limit(10)
+    );
+
+    res.json({
+      messages: serializeRoomMessagesForUser(messages, userId)
+    });
+  } catch (error) {
+    console.error('Error fetching pinned room messages:', error);
+    res.status(500).json({ message: 'Failed to fetch pinned messages' });
   }
 });
 
@@ -536,12 +576,21 @@ router.get('/rooms/:roomId/messages', async (req, res) => {
 router.post('/rooms/:roomId/messages', async (req, res) => {
   try {
     const { roomId } = req.params;
-    const { text, encryptedContent, messageType = 'text', replyTo, expiresInSeconds, tempId } = req.body;
+    const {
+      text,
+      encryptedContent,
+      messageType = 'text',
+      replyTo,
+      expiresInSeconds,
+      tempId,
+      forwardedFrom
+    } = req.body;
     const userId = req.user._id;
     const storedText = resolveStoredTextContent({
       plaintext: text,
       encryptedContent
     });
+    const normalizedForwardedFrom = normalizeForwardedFrom(forwardedFrom);
     const payloadValidation = validateDeviceBoundPayload({
       encryptedContent,
       authenticatedDeviceId: req.deviceId || null,
@@ -624,6 +673,7 @@ router.post('/rooms/:roomId/messages', async (req, res) => {
       messageType,
       isPrivate: false,
       replyTo: replyTo || null,
+      forwardedFrom: normalizedForwardedFrom,
       tempId: tempId || null,
       ...privacyFields
     });
@@ -635,10 +685,7 @@ router.post('/rooms/:roomId/messages', async (req, res) => {
     await room.updateActivity();
 
     // Populate sender information
-    await message.populate('sender', 'username avatar');
-    if (replyTo) {
-      await message.populate('replyTo', 'content sender');
-    }
+    await populateRoomMessage(message);
 
     const io = req.app.get('io');
     if (io) {
@@ -714,11 +761,60 @@ router.post('/rooms/:roomId/messages/:messageId/consume-view-once', async (req, 
 
     res.json({
       consumed,
-      message: redactRoomMessageForUser(message, userId)
+      message: serializeRoomMessageForUser(message, userId)
     });
   } catch (error) {
     console.error('Error consuming room view-once message:', error);
     res.status(500).json({ message: 'Failed to consume the view-once attachment' });
+  }
+});
+
+router.patch('/rooms/:roomId/messages/:messageId/pin', async (req, res) => {
+  try {
+    const { roomId, messageId } = req.params;
+    const requestedPinnedState = req.body?.isPinned;
+    const userId = req.user._id;
+
+    const room = await Room.findById(roomId);
+    if (!room || !room.isActive) {
+      return res.status(404).json({ message: 'Room not found' });
+    }
+
+    if (!room.isMember(userId)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const message = await Message.findOne({
+      _id: messageId,
+      room: roomId,
+      isDeleted: false
+    });
+
+    if (!message) {
+      return res.status(404).json({ message: 'Message not found' });
+    }
+
+    const nextPinnedState = typeof requestedPinnedState === 'boolean'
+      ? requestedPinnedState
+      : !message.isPinned;
+
+    message.setPinned(userId, nextPinnedState);
+    await message.save();
+    await populateRoomMessage(message);
+
+    const payload = {
+      roomId: room._id.toString(),
+      message: serializeRoomMessageForUser(message, userId)
+    };
+    const io = req.app.get('io');
+    if (io) {
+      emitSocketEvent(io.to(`room:${roomId}`), 'room_message_pin', payload);
+    }
+
+    res.json(payload);
+  } catch (error) {
+    console.error('Error pinning room message:', error);
+    res.status(500).json({ message: 'Failed to update the pinned state' });
   }
 });
 

@@ -21,7 +21,7 @@ const baseReactConfig = {
   },
   rules: {
     'no-unused-vars': ['error', {
-      varsIgnorePattern: '^[A-Z_]',
+      varsIgnorePattern: '^[A-Z_|motion]',
       argsIgnorePattern: '^[A-Z_]',
       caughtErrorsIgnorePattern: '^[A-Z_]',
     }],
@@ -29,7 +29,7 @@ const baseReactConfig = {
 }
 
 export default defineConfig([
-  globalIgnores(['dist', 'coverage']),
+  globalIgnores(['dist', 'coverage', 'public/vendor']),
   {
     files: ['src/context/AuthContext.jsx'],
     ...baseReactConfig,

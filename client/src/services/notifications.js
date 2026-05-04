@@ -2,6 +2,11 @@ import api from './api';
 
 const SERVICE_WORKER_URL = '/sw.js';
 
+const canUseServiceWorker = () => (
+  typeof window !== 'undefined'
+  && 'serviceWorker' in navigator
+);
+
 const urlBase64ToUint8Array = (base64String) => {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -16,19 +21,21 @@ const urlBase64ToUint8Array = (base64String) => {
 };
 
 const supportsPushNotifications = () => (
-  typeof window !== 'undefined'
-  && 'serviceWorker' in navigator
+  canUseServiceWorker()
   && 'PushManager' in window
   && 'Notification' in window
 );
 
 const registerServiceWorker = async () => {
-  if (!supportsPushNotifications()) {
+  if (!canUseServiceWorker()) {
     return null;
   }
 
   const existingRegistration = await navigator.serviceWorker.getRegistration();
   if (existingRegistration) {
+    existingRegistration.update().catch((error) => {
+      console.warn('Service worker update check failed:', error);
+    });
     return existingRegistration;
   }
 

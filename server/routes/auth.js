@@ -15,6 +15,10 @@ const {
   validateUsername
 } = require('../utils/validation');
 const { parsePaginationLimit } = require('../utils/pagination');
+const {
+  attachPasskeyEnrollmentStatus,
+  requirePasskeyEnrollment
+} = require('../utils/passkeyEnrollment');
 
 const router = express.Router();
 const requireCsrf = authenticateToken.requireCsrf;
@@ -27,6 +31,20 @@ const normalizeOptionalEmail = (value) => {
   const normalizedValue = normalizeIdentifier(value).toLowerCase();
   return normalizedValue || null;
 };
+const serializeAuthUser = async (user) => attachPasskeyEnrollmentStatus({
+  id: user._id,
+  username: user.username,
+  email: user.email || null,
+  bio: user.bio,
+  firstName: user.firstName,
+  lastName: user.lastName,
+  phone: user.phone,
+  location: user.location,
+  avatar: user.avatar,
+  status: user.status,
+  lastSeen: user.lastSeen,
+  joinedAt: user.joinedAt
+}, user._id);
 
 // Register new user
 router.post('/register', authLimiter, async (req, res) => {
@@ -109,18 +127,7 @@ router.post('/register', authLimiter, async (req, res) => {
 
     res.status(201).json({
       message: 'User registered successfully',
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email || null,
-        bio: user.bio,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        phone: user.phone,
-        location: user.location,
-        avatar: user.avatar,
-        joinedAt: user.joinedAt
-      },
+      user: await serializeAuthUser(user),
       session: {
         deviceId: session.deviceId,
         expiresAt: session.expiresAt
@@ -199,20 +206,7 @@ router.post('/login', authLimiter, async (req, res) => {
 
     res.json({
       message: 'Login successful',
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email || null,
-        bio: user.bio,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        phone: user.phone,
-        location: user.location,
-        avatar: user.avatar,
-        status: user.status,
-        lastSeen: user.lastSeen,
-        joinedAt: user.joinedAt
-      },
+      user: await serializeAuthUser(user),
       session: {
         deviceId: session.deviceId,
         expiresAt: session.expiresAt
@@ -255,18 +249,7 @@ router.get('/profile', authenticateToken, async (req, res) => {
 
     res.json({
       user: {
-        id: user._id,
-        username: user.username,
-        email: user.email || null,
-        bio: user.bio,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        phone: user.phone,
-        location: user.location,
-        avatar: user.avatar,
-        status: user.status,
-        lastSeen: user.lastSeen,
-        joinedAt: user.joinedAt
+        ...(await serializeAuthUser(user))
       }
     });
   } catch (error) {
@@ -276,7 +259,7 @@ router.get('/profile', authenticateToken, async (req, res) => {
 });
 
 // Update user profile (PATCH for partial updates)
-router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
+router.patch('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
   try {
     const { username, email, bio, firstName, lastName, phone, location, avatar } = req.body;
     const user = await User.findById(req.user._id);
@@ -356,20 +339,7 @@ router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
 
     res.json({
       message: 'Profile updated successfully',
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email || null,
-        bio: user.bio,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        phone: user.phone,
-        location: user.location,
-        avatar: user.avatar,
-        status: user.status,
-        lastSeen: user.lastSeen,
-        joinedAt: user.joinedAt
-      }
+      user: await serializeAuthUser(user)
     });
   } catch (error) {
     console.error('Profile update error:', error);
@@ -391,7 +361,7 @@ router.patch('/profile', authenticateToken, requireCsrf, async (req, res) => {
 });
 
 // Update user status
-router.patch('/status', authenticateToken, requireCsrf, async (req, res) => {
+router.patch('/status', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
   try {
     const { status } = req.body;
     const validStatuses = ['online', 'away', 'busy', 'offline'];
@@ -422,7 +392,7 @@ router.patch('/status', authenticateToken, requireCsrf, async (req, res) => {
 });
 
 // Update user profile (PUT - original endpoint)
-router.put('/profile', authenticateToken, requireCsrf, async (req, res) => {
+router.put('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
   try {
     const { username, bio, status, avatar } = req.body;
     const user = await User.findById(req.user._id);
@@ -474,16 +444,7 @@ router.put('/profile', authenticateToken, requireCsrf, async (req, res) => {
 
     res.json({
       message: 'Profile updated successfully',
-      user: {
-        id: user._id,
-        username: user.username,
-        email: user.email || null,
-        bio: user.bio,
-        avatar: user.avatar,
-        status: user.status,
-        lastSeen: user.lastSeen,
-        joinedAt: user.joinedAt
-      }
+      user: await serializeAuthUser(user)
     });
   } catch (error) {
     console.error('Profile update error:', error);
@@ -502,7 +463,7 @@ router.put('/profile', authenticateToken, requireCsrf, async (req, res) => {
 });
 
 // Change password
-router.put('/change-password', authenticateToken, requireCsrf, async (req, res) => {
+router.put('/change-password', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
 
@@ -569,14 +530,10 @@ router.put('/change-password', authenticateToken, requireCsrf, async (req, res) 
 });
 
 // Verify JWT token
-router.get('/verify', authenticateToken, (req, res) => {
+router.get('/verify', authenticateToken, async (req, res) => {
   res.json({ 
     valid: true, 
-    user: {
-      id: req.user._id,
-      username: req.user.username,
-      email: req.user.email || null
-    },
+    user: await serializeAuthUser(req.user),
     session: {
       deviceId: req.deviceId || null,
       expiresAt: req.session?.expiresAt || null
@@ -585,7 +542,7 @@ router.get('/verify', authenticateToken, (req, res) => {
 });
 
 // Search users (for adding to rooms or private chats)
-router.get('/users/search', authenticateToken, async (req, res) => {
+router.get('/users/search', authenticateToken, requirePasskeyEnrollment, async (req, res) => {
   try {
     const { q, limit = 10 } = req.query;
     

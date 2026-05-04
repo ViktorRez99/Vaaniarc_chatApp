@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VaaniArc Offline</title>
+    <meta name="theme-color" content="#0f172a" />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top left, rgba(56, 189, 248, 0.2), transparent 32%),
+          radial-gradient(circle at bottom right, rgba(99, 102, 241, 0.18), transparent 36%),
+          linear-gradient(135deg, #020617, #0f172a 45%, #111827);
+        color: #e2e8f0;
+        font-family: Inter, system-ui, sans-serif;
+        padding: 24px;
+      }
+
+      .card {
+        width: min(100%, 520px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 24px;
+        padding: 32px;
+        background: rgba(15, 23, 42, 0.78);
+        backdrop-filter: blur(20px);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 999px;
+        border: 1px solid rgba(56, 189, 248, 0.28);
+        background: rgba(56, 189, 248, 0.12);
+        color: #bae6fd;
+        padding: 8px 14px;
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+      }
+
+      h1 {
+        margin: 18px 0 12px;
+        font-size: clamp(28px, 6vw, 40px);
+        line-height: 1.05;
+      }
+
+      p {
+        margin: 0;
+        color: #cbd5e1;
+        line-height: 1.7;
+      }
+
+      ul {
+        margin: 20px 0 0;
+        padding-left: 18px;
+        color: #cbd5e1;
+        line-height: 1.7;
+      }
+
+      a {
+        color: #7dd3fc;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="badge">Offline shell ready</div>
+      <h1>VaaniArc is offline right now.</h1>
+      <p>
+        The cached app shell is still available on this device, but live API and realtime features need the backend to be reachable again.
+      </p>
+      <ul>
+        <li>Open tabs stay usable for cached screens and local runtime state.</li>
+        <li>Queued realtime sends will retry after connectivity returns.</li>
+        <li>Refresh this page once the network is back to restore full messaging and meeting flows.</li>
+      </ul>
+    </main>
+  </body>
+</html>

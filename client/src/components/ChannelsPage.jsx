@@ -46,6 +46,12 @@ const formatTime = (date) => {
   });
 };
 
+const getDisplayName = (user) => {
+  if (!user) return 'User';
+  const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ');
+  return fullName || user.username || 'User';
+};
+
 const ChannelsPage = () => {
   const { user } = useAuth();
   const [channels, setChannels] = useState([]);
@@ -495,7 +501,7 @@ const ChannelsPage = () => {
         <div className={`w-11 h-11 rounded-2xl flex items-center justify-center ${
           community.visibility === 'private'
             ? 'bg-gradient-to-br from-amber-500 to-orange-600'
-            : 'bg-gradient-to-br from-emerald-500 to-teal-600'
+            : 'bg-gradient-to-br from-accent/30 to-emerald-neon/20'
         }`}>
           {community.visibility === 'private' ? (
             <Lock className="w-5 h-5 text-white" />
@@ -516,7 +522,7 @@ const ChannelsPage = () => {
             type="button"
             onClick={() => handleJoinCommunity(community._id)}
             disabled={joiningCommunityId === community._id}
-            className="rounded-xl bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-400 disabled:opacity-60"
+            className="rounded-xl bg-accent text-void hover:brightness-110 px-3 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-60"
           >
             {joiningCommunityId === community._id ? 'Joining...' : 'Join'}
           </button>
@@ -530,7 +536,7 @@ const ChannelsPage = () => {
   );
 
   return (
-    <div className="flex h-full bg-[#0b141a] overflow-hidden">
+    <div className="flex h-full bg-void overflow-hidden">
       <div className={`w-full md:w-80 lg:w-96 flex flex-col flex-shrink-0 ${selectedChannel ? 'hidden md:flex' : 'flex'}`} style={{ background: 'linear-gradient(180deg, rgba(30,30,40,0.95) 0%, rgba(15,15,25,0.98) 100%)', backdropFilter: 'blur(40px) saturate(180%)', borderRight: '1px solid rgba(255,255,255,0.08)' }}>
         <div className="p-4 md:p-5 border-b border-white/5">
           <div className="relative">
@@ -574,7 +580,7 @@ const ChannelsPage = () => {
         </div>
 
         {showCreateCommunity && (
-          <form onSubmit={handleCreateCommunity} className="m-3 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 space-y-3">
+          <form onSubmit={handleCreateCommunity} className="m-3 rounded-2xl border border-accent/15 bg-accent/[0.05] p-4 space-y-3">
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-white/50">Community Name</label>
               <input
@@ -607,7 +613,7 @@ const ChannelsPage = () => {
                   onClick={() => setCommunityForm((currentValue) => ({ ...currentValue, visibility }))}
                   className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
                     communityForm.visibility === visibility
-                      ? 'border-emerald-400/40 bg-emerald-500/20 text-emerald-100'
+                      ? 'border-emerald-400/40 bg-accent text-void hover:brightness-110/20 text-emerald-100'
                       : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10'
                   }`}
                 >
@@ -617,7 +623,7 @@ const ChannelsPage = () => {
             </div>
 
             <div className="flex gap-2">
-              <button type="submit" disabled={isCreatingCommunity} className="flex-1 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-400 disabled:opacity-60">
+              <button type="submit" disabled={isCreatingCommunity} className="flex-1 rounded-xl bg-accent text-void hover:brightness-110 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-60">
                 {isCreatingCommunity ? 'Creating...' : 'Create'}
               </button>
               <button type="button" onClick={() => { setShowCreateCommunity(false); setCommunityForm(INITIAL_COMMUNITY_FORM); }} className="rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-white/70 transition-colors hover:bg-white/10">
@@ -758,8 +764,8 @@ const ChannelsPage = () => {
       </div>
 
       {selectedChannel ? (
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative bg-[#0b141a]">
-          <div className="absolute top-0 left-0 right-0 z-20 h-16 px-4 flex items-center justify-between border-b border-white/5 bg-slate-900/20 backdrop-blur-2xl">
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative chat-bg-animated">
+          <div className="absolute top-0 left-0 right-0 z-20 h-16 px-4 flex items-center justify-between border-b border-white/[0.08] bg-[#111118]">
             <div className="flex items-center gap-3">
               <button type="button" onClick={() => setSelectedChannel(null)} className="md:hidden p-2 rounded-full text-slate-200 transition-colors hover:bg-white/10">
                 <ArrowLeft className="w-5 h-5" />
@@ -786,9 +792,9 @@ const ChannelsPage = () => {
               {selectedChannel.canPost ? 'Broadcast + replies' : 'Broadcast only'}
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-4 md:p-6 pt-20 space-y-3 bg-[#0b141a]" style={{ backgroundImage: "url('data:image/svg+xml,%3Csvg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\"%3E%3Cpath d=\"M0 0h100v100H0z\" fill=\"%230b141a\"/%3E%3Cpath d=\"M20 20h60v60H20z\" fill=\"%23121a22\" opacity=\".05\"/%3E%3C/svg%3E')", backgroundSize: '40px 40px' }}>
+          <div className="relative z-10 flex-1 overflow-y-auto p-4 md:p-6 pt-20 space-y-3">
             <div className="flex justify-center">
-              <div className="rounded-xl border border-white/5 bg-slate-900/50 px-4 py-2 shadow-sm">
+              <div className="rounded-xl border border-white/5 bg-white/[0.03] px-4 py-2 shadow-sm">
                 <p className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
                   <Zap className="w-3 h-3 text-yellow-500" />
                   <span>Channels are broadcast surfaces. Posts sync in real time and remain server-readable for moderation and discovery.</span>
@@ -815,16 +821,16 @@ const ChannelsPage = () => {
                 <div key={post._id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[88%] sm:max-w-[78%] md:max-w-[72%] rounded-2xl px-4 py-3 shadow-md ${
                     isOwn
-                      ? 'bg-[#005c4b] text-white rounded-br-none'
-                      : 'bg-[#202c33] text-[#e9edef] rounded-bl-none'
+                      ? 'bg-accent/[0.12] text-tx-primary rounded-br-md border border-accent/10'
+                      : 'bg-white/[0.05] text-tx-primary rounded-bl-md border border-white/[0.06]'
                   }`}>
                     {!isOwn && (
                       <p className="mb-1 text-xs font-semibold text-sky-300">
-                        {post.author?.username || 'Channel admin'}
+                        {getDisplayName(post.author) || 'Channel admin'}
                       </p>
                     )}
                     <p className="break-words whitespace-pre-wrap">{post.content?.text || ''}</p>
-                    <div className="mt-2 flex items-center justify-end gap-2 text-xs text-[#8696a0]">
+                    <div className="mt-2 flex items-center justify-end gap-2 text-xs text-tx-muted">
                       {post.isEdited && <span>edited</span>}
                       <span>{formatTime(post.createdAt)}</span>
                     </div>
@@ -836,7 +842,7 @@ const ChannelsPage = () => {
             <div ref={postsEndRef} />
           </div>
 
-          <div className="p-4 md:p-5 bg-[#0b141a]">
+          <div className="relative z-10 p-3 md:p-4 bg-void/80 backdrop-blur-xl border-t border-bd-subtle">
             <form onSubmit={handleCreatePost} className="flex items-center gap-2">
               <div className="flex-1 relative">
                 <input
@@ -845,7 +851,7 @@ const ChannelsPage = () => {
                   onChange={(event) => setPostInput(event.target.value)}
                   disabled={!selectedChannel.canPost || isPosting}
                   placeholder={selectedChannel.canPost ? 'Publish an update' : 'Only channel admins can post here'}
-                  className="w-full rounded-3xl border border-white/10 px-5 py-3.5 text-[#e9edef] placeholder-[#8696a0] focus:outline-none focus:border-white/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="w-full rounded-3xl border border-white/10 px-5 py-3.5 text-tx-primary placeholder-tx-muted focus:outline-none focus:border-white/20 disabled:cursor-not-allowed disabled:opacity-60"
                   style={{ background: 'rgba(15,23,42,0.8)' }}
                 />
               </div>
@@ -862,17 +868,19 @@ const ChannelsPage = () => {
           </div>
         </div>
       ) : (
-        <div className="hidden md:flex flex-1 items-center justify-center bg-[#0b141a] min-w-0">
-          <div className="max-w-md px-6 text-center">
-            <div className="mx-auto mb-6 flex h-40 w-40 items-center justify-center rounded-full bg-sky-500/10">
-              <MessageCircle className="h-20 w-20 text-sky-300/60" />
+        <div className="hidden md:flex flex-1 items-center justify-center bg-void min-w-0 relative overflow-hidden">
+          <div className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full bg-accent/[0.03] blur-[100px] animate-pulse" />
+          <div className="absolute bottom-1/4 right-1/4 w-80 h-80 rounded-full bg-emerald-neon/[0.02] blur-[80px] animate-pulse" style={{ animationDelay: '1s' }} />
+          <div className="max-w-md px-6 text-center relative z-10">
+            <div className="mx-auto mb-6 flex h-40 w-40 items-center justify-center rounded-full bg-accent/[0.08] border border-accent/10">
+              <MessageCircle className="h-20 w-20 text-accent/40" strokeWidth={1} />
             </div>
-            <h3 className="text-3xl font-light text-[#e9edef]">Channels And Communities</h3>
-            <p className="mt-3 text-sm leading-relaxed text-[#8696a0]">
+            <h3 className="text-2xl font-display font-semibold text-tx-primary tracking-tight">Channels And Communities</h3>
+            <p className="mt-3 text-sm leading-relaxed text-tx-muted">
               Run broadcast channels, organize them inside communities, and deliver updates in real time from the same chat hub.
             </p>
-            <div className="mt-6 flex items-center justify-center gap-2 text-xs text-[#667781]">
-              <Users className="w-4 h-4" />
+            <div className="mt-6 flex items-center justify-center gap-2 text-xs text-tx-muted">
+              <Users className="w-4 h-4" strokeWidth={1.5} />
               <span>Public channels are discoverable. Private ones stay invite-only.</span>
             </div>
           </div>

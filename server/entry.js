@@ -8,8 +8,7 @@ const availableCpuCount = typeof os.availableParallelism === 'function'
 const workerCount = Number.isFinite(workerCountFromEnv) && workerCountFromEnv > 0
   ? workerCountFromEnv
   : Math.max(1, availableCpuCount);
-const clusterEnabled = process.env.NODE_ENV === 'production'
-  || String(process.env.CLUSTER_ENABLED || '').toLowerCase() === 'true';
+const clusterEnabled = String(process.env.CLUSTER_ENABLED || '').toLowerCase() === 'true';
 
 if (clusterEnabled && cluster.isPrimary && workerCount > 1) {
   for (let index = 0; index < workerCount; index += 1) {

@@ -1,6 +1,4 @@
-/**
- * Centralized error handling middleware
- */
+const logger = require('../utils/logger');
 
 // Custom error class
 class AppError extends Error {
@@ -56,8 +54,12 @@ const handleFileTypeError = () => {
 
 // Development error response
 const sendErrorDev = (err, req, res) => {
-  // Log error for debugging
-  console.error('ERROR 💥:', err);
+  logger.error('Request error', {
+    message: err.message,
+    stack: err.stack,
+    path: req.originalUrl,
+    method: req.method
+  });
   
   res.status(err.statusCode || 500).json({
     status: err.status || 'error',
@@ -78,8 +80,12 @@ const sendErrorProd = (err, req, res) => {
   } 
   // Programming or unknown error: don't leak error details
   else {
-    // Log error for debugging
-    console.error('ERROR 💥:', err);
+    logger.error('Unhandled request error', {
+      message: err.message,
+      stack: err.stack,
+      path: req.originalUrl,
+      method: req.method
+    });
     
     // Send generic message to client
     res.status(500).json({
@@ -96,7 +102,7 @@ const errorHandler = (err, req, res, next) => {
 
   if (process.env.NODE_ENV === 'development') {
     sendErrorDev(err, req, res);
-  } else if (process.env.NODE_ENV === 'production') {
+  } else {
     let error = { ...err };
     error.message = err.message;
 

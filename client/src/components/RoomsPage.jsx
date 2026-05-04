@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   File,
+  Forward,
   Globe,
   Lock,
   MessageCircle,
   Paperclip,
+  Pin,
   Plus,
   Search,
   Send,
@@ -16,7 +18,18 @@ import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import socketService from '../services/socket';
 import cryptoService from '../services/cryptoService';
+import MessageAttachmentCard from './MessageAttachmentCard';
+import ForwardMessageDialog from './ForwardMessageDialog';
 import { idsEqual, normalizeId } from '../utils/identity';
+import {
+  buildForwardedFromPayload,
+  getForwardPreviewText,
+  getMessageSenderName,
+  getMessageTextContent,
+  isForwardablePlaintextMessage,
+  mergePinnedMessage,
+  sortPinnedMessages
+} from '../utils/messageForwarding';
 import {
   computeExpiresAt,
   getDisappearingTimerOption,
@@ -33,6 +46,12 @@ const INITIAL_ROOM_FORM = {
 const sortRoomsByActivity = (rooms = []) => [...rooms].sort(
   (left, right) => new Date(right.lastActivity || right.updatedAt || 0) - new Date(left.lastActivity || left.updatedAt || 0)
 );
+
+const getDisplayName = (user) => {
+  if (!user) return 'User';
+  const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ');
+  return fullName || user.username || 'User';
+};
 
 const RoomsPage = () => {
   const { user, encryptionState } = useAuth();
@@ -51,6 +70,8 @@ const RoomsPage = () => {
   const [joiningRoomId, setJoiningRoomId] = useState(null);
   const [disappearingTimer, setDisappearingTimer] = useState(null);
   const [viewOnceNextFile, setViewOnceNextFile] = useState(false);
+  const [pinnedMessages, setPinnedMessages] = useState([]);
+  const [forwardingMessage, setForwardingMessage] = useState(null);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const selectedRoomRef = useRef(null);
@@ -82,12 +103,14 @@ const RoomsPage = () => {
   useEffect(() => {
     if (!selectedRoom?._id) {
       setMessages([]);
+      setPinnedMessages([]);
       setTypingUsers(new Set());
       return undefined;
     }
 
     socketService.joinRoom(selectedRoom._id);
     void fetchRoomMessages(selectedRoom._id);
+    void fetchPinnedRoomMessages(selectedRoom._id);
 
     return () => {
       socketService.leaveRoom(selectedRoom._id);
@@ -181,16 +204,45 @@ const RoomsPage = () => {
     }
   };
 
+  const fetchPinnedRoomMessages = async (roomId) => {
+    try {
+      const response = await api.getPinnedRoomMessages(roomId);
+      const decryptedMessages = await cryptoService.hydrateRoomMessages(
+        Array.isArray(response?.messages) ? response.messages : []
+      );
+      setPinnedMessages(sortPinnedMessages(decryptedMessages));
+    } catch (fetchError) {
+      console.error('Error fetching pinned room messages:', fetchError);
+      setPinnedMessages([]);
+    }
+  };
+
   const setupSocketListeners = () => {
     socketService.on('room_message', handleRoomMessage);
+    socketService.on('room_message_pin', handleRoomMessagePin);
     socketService.on('user_typing_room', handleUserTypingRoom);
     socketService.on('user_stop_typing_room', handleUserStopTypingRoom);
   };
 
   const cleanupSocketListeners = () => {
     socketService.off('room_message', handleRoomMessage);
+    socketService.off('room_message_pin', handleRoomMessagePin);
     socketService.off('user_typing_room', handleUserTypingRoom);
     socketService.off('user_stop_typing_room', handleUserStopTypingRoom);
+  };
+
+  const updateRoomMessageEverywhere = (nextMessage) => {
+    if (!nextMessage?._id) {
+      return;
+    }
+
+    setMessages((currentMessages) => currentMessages.map((message) => (
+      idsEqual(message._id, nextMessage._id) ? { ...message, ...nextMessage, isOptimistic: false } : message
+    )));
+
+    if (selectedRoomRef.current?._id && idsEqual(nextMessage.room?._id || nextMessage.room, selectedRoomRef.current._id)) {
+      setPinnedMessages((currentMessages) => mergePinnedMessage(currentMessages, nextMessage));
+    }
   };
 
   const handleRoomMessage = async (incomingMessage) => {
@@ -225,6 +277,11 @@ const RoomsPage = () => {
 
       return [...currentMessages, hydratedMessage];
     });
+  };
+
+  const handleRoomMessagePin = async ({ message }) => {
+    const hydratedMessage = await cryptoService.hydrateRoomMessage(message);
+    updateRoomMessageEverywhere(hydratedMessage);
   };
 
   const handleUserTypingRoom = ({ roomId, username, userId }) => {
@@ -388,6 +445,66 @@ const RoomsPage = () => {
     }
   };
 
+  const handleTogglePin = async (message) => {
+    try {
+      const response = await api.updateRoomMessagePin(selectedRoom._id, message._id, !message.isPinned);
+      const updatedMessage = await cryptoService.hydrateRoomMessage(response?.message || response?.data?.message);
+      if (updatedMessage) {
+        updateRoomMessageEverywhere(updatedMessage);
+      }
+    } catch (pinError) {
+      console.error('Error updating room pin state:', pinError);
+      setError(pinError.message || 'Failed to update the pinned message.');
+    }
+  };
+
+  const startForwardingMessage = (message) => {
+    if (!isForwardablePlaintextMessage(message)) {
+      setError('Only text messages can be forwarded right now.');
+      return;
+    }
+
+    setForwardingMessage(message);
+  };
+
+  const handleForwardMessage = async ({ type, item }) => {
+    if (!forwardingMessage) {
+      return;
+    }
+
+    const plaintext = getMessageTextContent(forwardingMessage);
+    if (!plaintext) {
+      throw new Error('The message text is not available for forwarding on this device.');
+    }
+
+    const currentUserId = user?._id || user?.id;
+    const forwardedFrom = buildForwardedFromPayload(forwardingMessage, 'room', selectedRoomRef.current?._id);
+
+    if (type === 'user') {
+      const targetChat = await api.createOrGetChat(item._id);
+      const encryptedContent = await cryptoService.encryptTextForUsers(plaintext, [item._id, currentUserId]);
+      await api.sendChatMessage(targetChat._id, {
+        content: cryptoService.encryptedPlaceholder,
+        encryptedContent,
+        forwardedFrom
+      });
+      return;
+    }
+
+    const roomMemberIds = getRoomMemberIds(item);
+    if (!roomMemberIds.length) {
+      throw new Error('The selected group is missing member encryption keys.');
+    }
+
+    const encryptedContent = await cryptoService.encryptTextForUsers(plaintext, roomMemberIds);
+    await api.sendRoomMessage(item._id, {
+      text: cryptoService.encryptedPlaceholder,
+      encryptedContent,
+      forwardedFrom
+    });
+    await loadRooms();
+  };
+
   const formatTime = (date) => {
     const value = new Date(date);
 
@@ -443,12 +560,47 @@ const RoomsPage = () => {
       return;
     }
 
+    const tempId = `room-file-${Date.now()}`;
+
     try {
-      const tempId = `room-file-${Date.now()}`;
       const encryptedAttachment = await cryptoService.encryptAttachmentForUsers(
         file,
         getRoomMemberIds(selectedRoom)
       );
+      const optimisticMessage = {
+        _id: tempId,
+        tempId,
+        room: selectedRoom._id,
+        sender: {
+          _id: user?._id || user?.id,
+          username: user?.username,
+          avatar: user?.avatar
+        },
+        content: {
+          text: encryptedAttachment.attachmentMetadata?.originalName || file.name,
+          file: {
+            mimetype: file.type,
+            size: file.size
+          }
+        },
+        decryptedFileMetadata: encryptedAttachment.attachmentMetadata,
+        localAttachmentPreviewUrl: encryptedAttachment.attachmentMetadata?.category === 'image'
+          ? URL.createObjectURL(file)
+          : null,
+        createdAt: new Date().toISOString(),
+        expiresInSeconds: disappearingTimer,
+        expiresAt: computeExpiresAt(disappearingTimer),
+        isViewOnce: viewOnceNextFile,
+        isOptimistic: true,
+        uploadState: 'uploading'
+      };
+
+      setMessages((currentMessages) => [...currentMessages, optimisticMessage]);
+      setRooms((currentRooms) => sortRoomsByActivity(currentRooms.map((room) => (
+        idsEqual(room._id, selectedRoom._id)
+          ? { ...room, lastActivity: optimisticMessage.createdAt }
+          : room
+      ))));
 
       const response = await api.uploadRoomFile(selectedRoom._id, encryptedAttachment.encryptedFile, {
         tempId,
@@ -463,6 +615,16 @@ const RoomsPage = () => {
       }
 
       setMessages((currentMessages) => {
+        const optimisticIndex = currentMessages.findIndex((message) => (
+          message.isOptimistic && message.tempId && message.tempId === tempId
+        ));
+
+        if (optimisticIndex !== -1) {
+          const nextMessages = [...currentMessages];
+          nextMessages[optimisticIndex] = { ...savedMessage, isOptimistic: false };
+          return nextMessages;
+        }
+
         if (currentMessages.some((message) => message._id === savedMessage._id)) {
           return currentMessages;
         }
@@ -475,6 +637,15 @@ const RoomsPage = () => {
       }
     } catch (uploadError) {
       console.error('Error uploading encrypted room attachment:', uploadError);
+      setMessages((currentMessages) => currentMessages.map((message) => (
+        message.tempId === tempId
+          ? {
+              ...message,
+              isOptimistic: false,
+              uploadState: 'failed'
+            }
+          : message
+      )));
       setError(uploadError.message || 'Failed to send the encrypted room attachment.');
     }
   };
@@ -496,7 +667,7 @@ const RoomsPage = () => {
         <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${
           room.type === 'private'
             ? 'bg-gradient-to-br from-indigo-500 to-violet-600'
-            : 'bg-gradient-to-br from-emerald-500 to-teal-600'
+            : 'bg-gradient-to-br from-accent/30 to-emerald-neon/20'
         }`}>
           {room.type === 'private' ? (
             <Lock className="w-5 h-5 text-white" />
@@ -524,7 +695,7 @@ const RoomsPage = () => {
             type="button"
             onClick={() => handleJoinRoom(room._id)}
             disabled={joiningRoomId === room._id}
-            className="rounded-xl bg-emerald-500 px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-400 disabled:opacity-60"
+            className="rounded-xl bg-accent text-void hover:brightness-110 px-3 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-60"
           >
             {joiningRoomId === room._id ? 'Joining...' : 'Join'}
           </button>
@@ -570,7 +741,7 @@ const RoomsPage = () => {
     : `${selectedRoom?.members?.length || 0} member${selectedRoom?.members?.length === 1 ? '' : 's'}`;
 
   return (
-    <div className="flex h-full bg-[#0b141a] overflow-hidden">
+    <div className="flex h-full bg-void overflow-hidden">
       <div className={`w-full md:w-80 lg:w-96 flex flex-col flex-shrink-0 ${selectedRoom ? 'hidden md:flex' : 'flex'}`} style={{ background: 'linear-gradient(180deg, rgba(30,30,40,0.95) 0%, rgba(15,15,25,0.98) 100%)', backdropFilter: 'blur(40px) saturate(180%)', borderRight: '1px solid rgba(255,255,255,0.08)' }}>
         <div className="p-4 md:p-5 border-b border-white/5">
           <div className="relative">
@@ -597,7 +768,7 @@ const RoomsPage = () => {
         </div>
 
         {showCreateRoom && (
-          <form onSubmit={handleCreateRoom} className="m-3 rounded-2xl border border-emerald-500/20 bg-emerald-500/5 p-4 space-y-3">
+          <form onSubmit={handleCreateRoom} className="m-3 rounded-2xl border border-accent/15 bg-accent/[0.05] p-4 space-y-3">
             <div>
               <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-white/50">Group Name</label>
               <input
@@ -630,7 +801,7 @@ const RoomsPage = () => {
                   onClick={() => setRoomForm((currentValue) => ({ ...currentValue, type }))}
                   className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
                     roomForm.type === type
-                      ? 'border-emerald-400/40 bg-emerald-500/20 text-emerald-100'
+                      ? 'border-emerald-400/40 bg-accent text-void hover:brightness-110/20 text-emerald-100'
                       : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10'
                   }`}
                 >
@@ -643,7 +814,7 @@ const RoomsPage = () => {
               <button
                 type="submit"
                 disabled={isCreating}
-                className="flex-1 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-400 disabled:opacity-60"
+                className="flex-1 rounded-xl bg-accent text-void hover:brightness-110 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-60"
               >
                 {isCreating ? 'Creating...' : 'Create'}
               </button>
@@ -697,8 +868,8 @@ const RoomsPage = () => {
       </div>
 
       {selectedRoom ? (
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative bg-[#0b141a]">
-          <div className="absolute top-0 left-0 right-0 z-20 h-16 px-4 flex items-center justify-between border-b border-white/5 bg-slate-900/20 backdrop-blur-2xl">
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative chat-bg-animated">
+          <div className="absolute top-0 left-0 right-0 z-20 h-16 px-4 flex items-center justify-between border-b border-white/[0.08] bg-[#111118]">
             <div className="flex items-center gap-3">
               <button
                 type="button"
@@ -711,7 +882,7 @@ const RoomsPage = () => {
               <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
                 selectedRoom.type === 'private'
                   ? 'bg-gradient-to-br from-indigo-500 to-violet-600'
-                  : 'bg-gradient-to-br from-emerald-500 to-teal-600'
+                  : 'bg-gradient-to-br from-accent/30 to-emerald-neon/20'
               }`}>
                 {selectedRoom.type === 'private' ? (
                   <Lock className="w-5 h-5 text-white" />
@@ -731,9 +902,9 @@ const RoomsPage = () => {
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 md:p-6 pt-20 space-y-3 bg-[#0b141a]" style={{ backgroundImage: "url('data:image/svg+xml,%3Csvg width=\"100\" height=\"100\" xmlns=\"http://www.w3.org/2000/svg\"%3E%3Cpath d=\"M0 0h100v100H0z\" fill=\"%230b141a\"/%3E%3Cpath d=\"M20 20h60v60H20z\" fill=\"%23121a22\" opacity=\".05\"/%3E%3C/svg%3E')", backgroundSize: '40px 40px' }}>
+          <div className="relative z-10 flex-1 overflow-y-auto p-4 md:p-6 pt-20 space-y-3">
             <div className="flex justify-center">
-              <div className="rounded-xl border border-white/5 bg-slate-900/50 px-4 py-2 shadow-sm">
+              <div className="rounded-xl border border-white/5 bg-white/[0.03] px-4 py-2 shadow-sm">
                 <p className="flex items-center gap-1.5 text-xs font-medium text-slate-400">
                   <Zap className="w-3 h-3 text-yellow-500" />
                   <span>Group messages are encrypted for the members currently in this room on this device.</span>
@@ -746,12 +917,36 @@ const RoomsPage = () => {
                 {encryptionState?.message || 'Encryption is not ready on this device.'}
               </div>
             )}
+            {pinnedMessages.length > 0 && (
+              <div className="mx-auto w-full max-w-3xl rounded-2xl border border-indigo-400/20 bg-indigo-500/10 px-4 py-3">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-indigo-200/80">
+                  <Pin className="h-3.5 w-3.5" />
+                  Pinned messages
+                </div>
+                <div className="mt-3 space-y-2">
+                  {pinnedMessages.slice(0, 3).map((pinnedMessage) => (
+                    <div key={`room-pinned-${pinnedMessage._id}`} className="rounded-xl bg-black/15 px-3 py-2 text-sm text-white/80">
+                      <p className="font-semibold text-white">
+                        {getMessageSenderName(pinnedMessage)}
+                      </p>
+                      <p className="truncate text-white/60">
+                        {getForwardPreviewText(pinnedMessage)}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {(messages || []).map((message) => {
               const senderId = normalizeId(message?.sender?._id || message?.sender);
               const isOwn = idsEqual(senderId, user?._id || user?.id);
-              const fileDetails = message?.decryptedFileMetadata || message?.content?.file?.decryptedMetadata || message?.content?.file;
-              const hasAttachment = Boolean(message?.content?.file?.url || message?.fileUrl);
+              const hasAttachment = Boolean(
+                message?.content?.file?.url
+                || message?.fileUrl
+                || message?.decryptedFileMetadata
+                || message?.content?.file
+              );
 
               return (
                 <div
@@ -760,39 +955,37 @@ const RoomsPage = () => {
                 >
                   <div className={`max-w-[85%] sm:max-w-[75%] md:max-w-[70%] rounded-lg px-3 py-2 shadow-md ${
                     isOwn
-                      ? 'bg-[#005c4b] text-white rounded-br-none'
-                      : 'bg-[#202c33] text-[#e9edef] rounded-bl-none'
+                      ? 'bg-accent/[0.12] text-tx-primary rounded-br-md border border-accent/10'
+                      : 'bg-white/[0.05] text-tx-primary rounded-bl-md border border-white/[0.06]'
                   }`}>
+                    {(message.isPinned || message.forwardedFrom) && (
+                      <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-wide text-white/60">
+                        {message.isPinned && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1">
+                            <Pin className="h-3 w-3" />
+                            Pinned
+                          </span>
+                        )}
+                        {message.forwardedFrom && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1">
+                            <Forward className="h-3 w-3" />
+                            Forwarded from {message.forwardedFrom?.originalSenderName || message.forwardedFrom?.originalSender?.username || 'Unknown'}
+                          </span>
+                        )}
+                      </div>
+                    )}
                     {!isOwn && (
                       <p className="mb-1 text-xs font-semibold text-emerald-300">
-                        {message?.sender?.username || 'Member'}
+                        {getDisplayName(message?.sender) || 'Member'}
                       </p>
                     )}
 
                     {hasAttachment ? (
-                      <button
-                        type="button"
-                        onClick={() => handleDownloadAttachment(message)}
-                        className={`w-full flex items-center gap-3 rounded-md px-1 py-1 text-left transition-colors ${
-                          isOwn ? 'hover:bg-white/10' : 'hover:bg-white/5'
-                        }`}
-                      >
-                        <div className={`w-10 h-10 rounded-full flex items-center justify-center ${
-                          isOwn ? 'bg-white/15' : 'bg-black/20'
-                        }`}>
-                          <File className="w-5 h-5" />
-                        </div>
-                        <div className="min-w-0">
-                          <p className="break-words font-medium">
-                            {fileDetails?.originalName || message?.content?.text || 'Attachment'}
-                          </p>
-                          <p className="text-xs opacity-75">
-                            {fileDetails?.size
-                              ? `${Math.max(1, Math.round(fileDetails.size / 1024))} KB`
-                              : 'Tap to download'}
-                          </p>
-                        </div>
-                      </button>
+                      <MessageAttachmentCard
+                        message={message}
+                        isOwn={isOwn}
+                        onDownload={handleDownloadAttachment}
+                      />
                     ) : (
                       <p className="break-words">{message?.content?.text || ''}</p>
                     )}
@@ -817,7 +1010,30 @@ const RoomsPage = () => {
                       </div>
                     )}
 
-                    <div className="mt-1 flex justify-end text-xs text-[#8696a0]">
+                    {!message.isDeleted && (
+                      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => handleTogglePin(message)}
+                          className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                        >
+                          <Pin className="h-3 w-3" />
+                          {message.isPinned ? 'Unpin' : 'Pin'}
+                        </button>
+                        {isForwardablePlaintextMessage(message) && (
+                          <button
+                            type="button"
+                            onClick={() => startForwardingMessage(message)}
+                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                          >
+                            <Forward className="h-3 w-3" />
+                            Forward
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="mt-1 flex justify-end text-xs text-tx-muted">
                       {formatTime(message.createdAt)}
                     </div>
                   </div>
@@ -828,7 +1044,7 @@ const RoomsPage = () => {
             <div ref={messagesEndRef} />
           </div>
 
-          <div className="p-4 md:p-5 bg-[#0b141a]">
+          <div className="relative z-10 p-3 md:p-4 bg-void/80 backdrop-blur-xl border-t border-bd-subtle">
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -870,7 +1086,7 @@ const RoomsPage = () => {
                 className="rounded-2xl border border-white/10 bg-white/5 p-3 transition-all hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
                 title="Send encrypted file"
               >
-                <Paperclip className="w-5 h-5 text-[#e9edef]" />
+                <Paperclip className="w-5 h-5 text-tx-primary" />
               </button>
 
               <div className="flex-1 relative">
@@ -880,7 +1096,7 @@ const RoomsPage = () => {
                   onChange={handleTyping}
                   disabled={encryptionBlocked}
                   placeholder={encryptionBlocked ? 'Import your key backup to send encrypted room messages' : 'Type a room message'}
-                  className="w-full rounded-3xl border border-white/10 px-5 py-3.5 text-[#e9edef] placeholder-[#8696a0] focus:outline-none focus:border-white/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="w-full rounded-3xl border border-white/10 px-5 py-3.5 text-tx-primary placeholder-tx-muted focus:outline-none focus:border-white/20 disabled:cursor-not-allowed disabled:opacity-60"
                   style={{ background: 'rgba(15,23,42,0.8)' }}
                 />
               </div>
@@ -888,7 +1104,7 @@ const RoomsPage = () => {
               <button
                 type="submit"
                 disabled={!messageInput.trim() || encryptionBlocked}
-                className="rounded-2xl bg-[#00a884] p-3.5 transition-all disabled:cursor-not-allowed disabled:opacity-50 hover:bg-[#06cf9c]"
+                className="rounded-2xl bg-accent text-void hover:brightness-110 p-3.5 transition-all disabled:cursor-not-allowed disabled:opacity-50 hover:brightness-110"
                 title="Send room message"
               >
                 <Send className="w-5 h-5" />
@@ -897,22 +1113,33 @@ const RoomsPage = () => {
           </div>
         </div>
       ) : (
-        <div className="hidden md:flex flex-1 items-center justify-center bg-[#0b141a] min-w-0">
-          <div className="max-w-md px-6 text-center">
-            <div className="mx-auto mb-6 flex h-40 w-40 items-center justify-center rounded-full bg-emerald-500/10">
-              <Users className="h-20 w-20 text-emerald-300/60" />
+        <div className="hidden md:flex flex-1 items-center justify-center bg-void min-w-0 relative overflow-hidden">
+          <div className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full bg-accent/[0.03] blur-[100px] animate-pulse" />
+          <div className="absolute bottom-1/4 right-1/4 w-80 h-80 rounded-full bg-emerald-neon/[0.02] blur-[80px] animate-pulse" style={{ animationDelay: '1s' }} />
+          <div className="max-w-md px-6 text-center relative z-10">
+            <div className="mx-auto mb-6 flex h-40 w-40 items-center justify-center rounded-full bg-accent/[0.08] border border-accent/10">
+              <Users className="h-20 w-20 text-accent/40" strokeWidth={1} />
             </div>
-            <h3 className="text-3xl font-light text-[#e9edef]">Encrypted Group Chats</h3>
-            <p className="mt-3 text-sm leading-relaxed text-[#8696a0]">
+            <h3 className="text-2xl font-display font-semibold text-tx-primary tracking-tight">Encrypted Group Chats</h3>
+            <p className="mt-3 text-sm leading-relaxed text-tx-muted">
               Create a project room, join public spaces, and keep the message body encrypted for the members in that room.
             </p>
-            <div className="mt-6 flex items-center justify-center gap-2 text-xs text-[#667781]">
-              <MessageCircle className="w-4 h-4" />
+            <div className="mt-6 flex items-center justify-center gap-2 text-xs text-tx-muted">
+              <MessageCircle className="w-4 h-4" strokeWidth={1.5} />
               <span>Rooms update in real time with encrypted message bodies.</span>
             </div>
           </div>
         </div>
       )}
+
+      <ForwardMessageDialog
+        isOpen={Boolean(forwardingMessage)}
+        excludeRoomId={selectedRoom?._id || null}
+        excludeUserId={null}
+        messagePreview={forwardingMessage ? getForwardPreviewText(forwardingMessage) : ''}
+        onClose={() => setForwardingMessage(null)}
+        onForward={handleForwardMessage}
+      />
     </div>
   );
 };

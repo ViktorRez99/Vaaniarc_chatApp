@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">VaaniArc</title>
+  <desc id="desc">Rounded blue chat bubble icon for the VaaniArc web app.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F172A" />
+      <stop offset="100%" stop-color="#4338CA" />
+    </linearGradient>
+    <linearGradient id="bubble" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" />
+      <stop offset="100%" stop-color="#6366F1" />
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="64" fill="url(#bg)" />
+  <path
+    d="M64 84c0-13.255 10.745-24 24-24h80c13.255 0 24 10.745 24 24v48c0 13.255-10.745 24-24 24h-44.585L88 188.828V156H88c-13.255 0-24-10.745-24-24V84z"
+    fill="url(#bubble)"
+  />
+  <circle cx="104" cy="108" r="8" fill="#E0F2FE" />
+  <circle cx="128" cy="108" r="8" fill="#E0F2FE" />
+  <circle cx="152" cy="108" r="8" fill="#E0F2FE" />
+</svg>

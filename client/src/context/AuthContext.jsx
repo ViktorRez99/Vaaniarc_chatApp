@@ -10,11 +10,41 @@ import {
 } from 'react';
 import apiService from '../services/api';
 import socketService from '../services/socket';
-import cryptoService from '../services/cryptoService';
+import passkeyService from '../services/passkeys';
+import runtimeCoordinator from '../services/runtimeCoordinator';
 import {
   clearServerPushSubscription,
   syncPushSubscription
 } from '../services/notifications';
+
+let loadedCryptoService = null;
+let cryptoServicePromise = null;
+
+const loadCryptoService = async () => {
+  if (loadedCryptoService) {
+    return loadedCryptoService;
+  }
+
+  if (!cryptoServicePromise) {
+    cryptoServicePromise = import('../services/cryptoService')
+      .then((module) => {
+        loadedCryptoService = module.default;
+        return loadedCryptoService;
+      })
+      .catch((error) => {
+        cryptoServicePromise = null;
+        throw error;
+      });
+  }
+
+  return cryptoServicePromise;
+};
+
+const clearLoadedCryptoIdentity = () => {
+  if (loadedCryptoService) {
+    loadedCryptoService.clearActiveIdentity();
+  }
+};
 
 const buildSignedOutEncryptionState = () => ({
   status: 'signed_out',
@@ -85,6 +115,14 @@ const classifyBootstrapError = (error, fallbackCategory = 'runtime') => {
     category = 'database';
     message = 'The API is reachable, but the database is still reconnecting.';
   } else if (
+    error?.responseBody?.code === 'PASSKEY_REQUIRED'
+    || error?.responseBody?.passkeyRequired
+    || /passkey setup is required|passkey required/.test(normalizedMessage)
+  ) {
+    category = 'session';
+    message = 'Set up a passkey before using VaaniArc.';
+    retryable = false;
+  } else if (
     statusCode === 401
     || (statusCode === 403 && /csrf/.test(normalizedMessage))
     || error?.category === 'session'
@@ -148,6 +186,8 @@ const isTransientSessionRestoreError = (error) => {
     || error?.statusCode === 503
     || /failed to fetch|unable to connect|backend connection|database unavailable|server is not responding correctly|invalid response format|networkerror|offline/.test(normalizedMessage);
 };
+
+const userRequiresPasskeyEnrollment = (user) => Boolean(user?.passkeyRequired);
 
 const initialState = {
   user: null,
@@ -280,6 +320,7 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const syncEncryptionState = useCallback(async (nextUser) => {
+    const cryptoService = await loadCryptoService();
     const resolvedState = await cryptoService.ensureIdentity(nextUser);
     setEncryptionState(resolvedState);
     return resolvedState;
@@ -431,7 +472,7 @@ export const AuthProvider = ({ children }) => {
 
   const markSessionMissing = useCallback(() => {
     socketService.disconnect();
-    cryptoService.clearActiveIdentity();
+    clearLoadedCryptoIdentity();
     clearSessionRestoreState();
     resetRuntimeState();
     dispatch({ type: AUTH_ACTIONS.LOGOUT });
@@ -440,7 +481,7 @@ export const AuthProvider = ({ children }) => {
 
   const markSessionRestoreUnavailable = useCallback((message = SESSION_RESTORE_UNAVAILABLE_MESSAGE) => {
     socketService.disconnect();
-    cryptoService.clearActiveIdentity();
+    clearLoadedCryptoIdentity();
     resetRuntimeState();
     setSessionRestoreStatus('unavailable');
     setSessionRestoreMessage(message);
@@ -469,7 +510,11 @@ export const AuthProvider = ({ children }) => {
           type: AUTH_ACTIONS.LOGIN_SUCCESS,
           payload: { user: response.user }
         });
-        scheduleRuntimeBootstrap(response.user, { reason: 'session-restore' });
+        if (!userRequiresPasskeyEnrollment(response.user)) {
+          scheduleRuntimeBootstrap(response.user, { reason: 'session-restore' });
+        } else {
+          resetRuntimeState();
+        }
         return response;
       };
 
@@ -578,6 +623,38 @@ export const AuthProvider = ({ children }) => {
     void performSessionRestore();
   }, [performSessionRestore]);
 
+  useEffect(() => runtimeCoordinator.subscribe((event) => {
+    if (!event?.type) {
+      return;
+    }
+
+    if (event.type === 'auth:login') {
+      void performSessionRestore();
+      return;
+    }
+
+    if (event.type === 'auth:logout') {
+      socketService.disconnect();
+      clearLoadedCryptoIdentity();
+      clearSessionRestoreState();
+      resetRuntimeState();
+      dispatch({ type: AUTH_ACTIONS.LOGOUT });
+      dispatch({ type: AUTH_ACTIONS.SET_LOADING, payload: false });
+      return;
+    }
+
+    if (event.type === 'profile:update' && event.payload?.user) {
+      dispatch({
+        type: AUTH_ACTIONS.UPDATE_PROFILE,
+        payload: event.payload.user
+      });
+    }
+  }), [
+    clearSessionRestoreState,
+    performSessionRestore,
+    resetRuntimeState
+  ]);
+
   const login = async (credentials) => {
     clearSessionRestoreState();
     dispatch({ type: AUTH_ACTIONS.LOGIN_START });
@@ -589,11 +666,18 @@ export const AuthProvider = ({ children }) => {
         type: AUTH_ACTIONS.LOGIN_SUCCESS,
         payload: { user: response.user }
       });
-      scheduleRuntimeBootstrap(response.user, { reason: 'login' });
+      if (userRequiresPasskeyEnrollment(response.user)) {
+        resetRuntimeState();
+      } else {
+        runtimeCoordinator.publish('auth:login', {
+          userId: response.user?.id || response.user?._id || null
+        });
+        scheduleRuntimeBootstrap(response.user, { reason: 'login' });
+      }
       return response;
     } catch (error) {
       socketService.disconnect();
-      cryptoService.clearActiveIdentity();
+      clearLoadedCryptoIdentity();
       resetRuntimeState();
       dispatch({
         type: AUTH_ACTIONS.LOGIN_FAILURE,
@@ -614,11 +698,18 @@ export const AuthProvider = ({ children }) => {
         type: AUTH_ACTIONS.REGISTER_SUCCESS,
         payload: { user: response.user }
       });
-      scheduleRuntimeBootstrap(response.user, { reason: 'register' });
+      if (userRequiresPasskeyEnrollment(response.user)) {
+        resetRuntimeState();
+      } else {
+        runtimeCoordinator.publish('auth:login', {
+          userId: response.user?.id || response.user?._id || null
+        });
+        scheduleRuntimeBootstrap(response.user, { reason: 'register' });
+      }
       return response;
     } catch (error) {
       socketService.disconnect();
-      cryptoService.clearActiveIdentity();
+      clearLoadedCryptoIdentity();
       resetRuntimeState();
       dispatch({
         type: AUTH_ACTIONS.REGISTER_FAILURE,
@@ -628,7 +719,55 @@ export const AuthProvider = ({ children }) => {
     }
   };
 
+  const loginWithPasskey = async (identifier = '') => {
+    clearSessionRestoreState();
+    dispatch({ type: AUTH_ACTIONS.LOGIN_START });
+
+    try {
+      const response = await passkeyService.authenticate(identifier);
+      clearSessionRestoreState();
+      dispatch({
+        type: AUTH_ACTIONS.LOGIN_SUCCESS,
+        payload: { user: response.user }
+      });
+      runtimeCoordinator.publish('auth:login', {
+        userId: response.user?.id || response.user?._id || null
+      });
+      scheduleRuntimeBootstrap(response.user, { reason: 'passkey-login' });
+      return response;
+    } catch (error) {
+      socketService.disconnect();
+      clearLoadedCryptoIdentity();
+      resetRuntimeState();
+      dispatch({
+        type: AUTH_ACTIONS.LOGIN_FAILURE,
+        payload: error.message
+      });
+      throw error;
+    }
+  };
+
+  const refreshPasskeyEnrollment = async () => {
+    const response = await apiService.verifyToken();
+
+    dispatch({
+      type: AUTH_ACTIONS.LOGIN_SUCCESS,
+      payload: { user: response.user }
+    });
+
+    if (!userRequiresPasskeyEnrollment(response.user)) {
+      runtimeCoordinator.publish('auth:login', {
+        userId: response.user?.id || response.user?._id || null
+      });
+      scheduleRuntimeBootstrap(response.user, { reason: 'passkey-enrolled' });
+    }
+
+    return response.user;
+  };
+
   const logout = async () => {
+    const activeUserId = currentUserRef.current?._id || currentUserRef.current?.id || null;
+
     try {
       await clearServerPushSubscription();
       await apiService.logout();
@@ -637,9 +776,12 @@ export const AuthProvider = ({ children }) => {
     } finally {
       clearSessionRestoreState();
       socketService.disconnect();
-      cryptoService.clearActiveIdentity();
+      clearLoadedCryptoIdentity();
       resetRuntimeState();
       dispatch({ type: AUTH_ACTIONS.LOGOUT });
+      runtimeCoordinator.publish('auth:logout', {
+        userId: activeUserId
+      });
     }
   };
 
@@ -649,6 +791,9 @@ export const AuthProvider = ({ children }) => {
       dispatch({
         type: AUTH_ACTIONS.UPDATE_PROFILE,
         payload: response.user
+      });
+      runtimeCoordinator.publish('profile:update', {
+        user: response.user
       });
       return response;
     } catch (error) {
@@ -719,6 +864,7 @@ export const AuthProvider = ({ children }) => {
     setDeviceResetError('');
 
     try {
+      const cryptoService = await loadCryptoService();
       const resetState = await cryptoService.resetCurrentDeviceIdentity(currentUser);
       setEncryptionState(resetState);
       const bootstrapResult = await runRuntimeBootstrap(currentUser, { reason: 'device-reset' });
@@ -738,6 +884,7 @@ export const AuthProvider = ({ children }) => {
   }, [runRuntimeBootstrap]);
 
   const downloadEncryptionBackup = async (passphrase) => {
+    const cryptoService = await loadCryptoService();
     const backup = await cryptoService.downloadIdentityBackup(
       passphrase,
       state.user?._id || state.user?.id
@@ -752,6 +899,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   const restoreEncryptionBackup = async (serializedBackup, passphrase) => {
+    const cryptoService = await loadCryptoService();
     const restoredState = await cryptoService.importIdentityBackup(
       serializedBackup,
       passphrase,
@@ -844,6 +992,7 @@ export const AuthProvider = ({ children }) => {
 
   const value = {
     ...state,
+    requiresPasskeyEnrollment: state.isAuthenticated && userRequiresPasskeyEnrollment(state.user),
     encryptionState,
     devices,
     currentDeviceId,
@@ -856,10 +1005,12 @@ export const AuthProvider = ({ children }) => {
     realtimeError,
     runtimeDiagnostics,
     login,
+    loginWithPasskey,
     register,
     logout,
     updateProfile,
     changePassword,
+    refreshPasskeyEnrollment,
     clearError,
     refreshEncryptionState,
     retryBootstrap,

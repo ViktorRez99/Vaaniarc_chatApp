@@ -19,6 +19,7 @@ import {
   signPostQuantum,
   verifyPostQuantumSignature
 } from '../utils/postQuantumCrypto';
+import { buildEncryptedAttachmentMetadata } from '../utils/attachmentPreview';
 import {
   deleteDeviceKeyMaterial,
   deleteDeviceSessionsForDevice,
@@ -2111,11 +2112,7 @@ const cryptoService = {
   async encryptAttachmentForUsersV2(file, userIds = []) {
     const sodiumInstance = await this.ensureSodiumReady();
     const { messageKey, envelopes } = await this.buildDeviceEnvelopeContext(userIds);
-    const metadata = {
-      originalName: file.name,
-      mimetype: file.type || 'application/octet-stream',
-      size: file.size
-    };
+    const metadata = await buildEncryptedAttachmentMetadata(file);
     const dataNonce = sodiumInstance.randombytes_buf(sodiumInstance.crypto_secretbox_NONCEBYTES);
     const metadataNonce = sodiumInstance.randombytes_buf(sodiumInstance.crypto_secretbox_NONCEBYTES);
     const fileBytes = new Uint8Array(await file.arrayBuffer());
@@ -2144,7 +2141,8 @@ const cryptoService = {
       encryptedFile: new File([encryptedFileBytes], randomUploadName(), {
         type: 'application/octet-stream'
       }),
-      encryptionPayload: JSON.stringify(encryptionPayload)
+      encryptionPayload: JSON.stringify(encryptionPayload),
+      attachmentMetadata: metadata
     };
   },
 
@@ -2822,17 +2820,14 @@ const cryptoService = {
   async encryptAttachmentForDirectSession(file, userIds = []) {
     const sodiumInstance = await this.ensureSodiumReady();
     const targetDevices = await this.buildDirectTargetDevices(userIds);
+    const metadata = await buildEncryptedAttachmentMetadata(file);
     const fileKey = sodiumInstance.randombytes_buf(sodiumInstance.crypto_secretbox_KEYBYTES);
     const dataNonce = sodiumInstance.randombytes_buf(sodiumInstance.crypto_secretbox_NONCEBYTES);
     const fileBytes = new Uint8Array(await file.arrayBuffer());
     const encryptedFileBytes = sodiumInstance.crypto_secretbox_easy(fileBytes, dataNonce, fileKey);
     const encryptedBundle = textEncoder.encode(JSON.stringify({
       fileKey: base64FromBytes(fileKey),
-      metadata: {
-        originalName: file.name,
-        mimetype: file.type || 'application/octet-stream',
-        size: file.size
-      }
+      metadata
     }));
     const rawEnvelopes = await Promise.all(
       targetDevices.map((device) => this.buildDirectEnvelopeForDevice(
@@ -2866,7 +2861,8 @@ const cryptoService = {
       encryptedFile: new File([encryptedFileBytes], randomUploadName(), {
         type: 'application/octet-stream'
       }),
-      encryptionPayload: JSON.stringify(encryptionPayload)
+      encryptionPayload: JSON.stringify(encryptionPayload),
+      attachmentMetadata: metadata
     };
   },
 
@@ -2950,11 +2946,7 @@ const cryptoService = {
     } catch (deviceEncryptionError) {
       console.warn('Falling back to legacy attachment encryption:', deviceEncryptionError);
       const { aesKey, envelopes } = await this.buildEnvelopeContext(userIds);
-      const metadata = {
-        originalName: file.name,
-        mimetype: file.type || 'application/octet-stream',
-        size: file.size
-      };
+      const metadata = await buildEncryptedAttachmentMetadata(file);
 
       const [encryptedFile, encryptedMetadata] = await Promise.all([
         this.encryptBytes(aesKey, await file.arrayBuffer()),
@@ -2973,7 +2965,8 @@ const cryptoService = {
           metadataIv: encryptedMetadata.iv,
           metadataCiphertext: encryptedMetadata.ciphertext,
           envelopes
-        })
+        }),
+        attachmentMetadata: metadata
       };
     }
   },

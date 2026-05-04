@@ -135,10 +135,47 @@ const messageSchema = new mongoose.Schema({
     ref: 'Message',
     default: null
   },
+  forwardedFrom: {
+    originalMessageId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null
+    },
+    originalSender: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null
+    },
+    originalSenderName: {
+      type: String,
+      default: ''
+    },
+    sourceType: {
+      type: String,
+      enum: ['chat', 'room'],
+      default: 'chat'
+    },
+    sourceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null
+    }
+  },
   mentions: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }],
+  isPinned: {
+    type: Boolean,
+    default: false
+  },
+  pinnedAt: {
+    type: Date,
+    default: null
+  },
+  pinnedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
   metadata: {
     userAgent: String,
     ipAddress: String,
@@ -157,6 +194,7 @@ messageSchema.index({ isDeleted: 1, createdAt: -1 });
 messageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 messageSchema.index({ room: 1, sender: 1, tempId: 1 }, { sparse: true });
 messageSchema.index({ replyTo: 1, createdAt: -1 });
+messageSchema.index({ room: 1, isPinned: -1, pinnedAt: -1, createdAt: -1 });
 
 // Mark message as read by user
 messageSchema.methods.markAsRead = function(userId) {
@@ -212,11 +250,20 @@ messageSchema.methods.softDelete = function() {
   this.isDeleted = true;
   this.deletedAt = new Date();
   this.revocableUntil = new Date();
+  this.isPinned = false;
+  this.pinnedAt = null;
+  this.pinnedBy = null;
   this.encryptedContent = null;
   this.content.text = 'This message has been deleted';
   if (this.content.file) {
     this.content.file = null;
   }
+};
+
+messageSchema.methods.setPinned = function(userId, nextPinned) {
+  this.isPinned = Boolean(nextPinned);
+  this.pinnedAt = this.isPinned ? new Date() : null;
+  this.pinnedBy = this.isPinned ? userId : null;
 };
 
 // Check if user can edit this message

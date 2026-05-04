@@ -48,13 +48,14 @@ const ensureRedisConnection = async () => {
   if (!process.env.REDIS_URL) {
     redisState.mode = 'memory';
     redisState.connected = false;
+    redisState.connectPromise = null;
     return {
       mode: 'memory',
       client: null
     };
   }
 
-  if (redisState.client && redisState.connected) {
+  if (redisState.client && redisState.connected && redisState.client.isOpen) {
     return {
       mode: 'redis',
       client: redisState.client
@@ -62,6 +63,10 @@ const ensureRedisConnection = async () => {
   }
 
   if (!redisState.connectPromise) {
+    if (redisState.client && !redisState.client.isOpen) {
+      redisState.client = null;
+    }
+
     const client = createClient({
       url: process.env.REDIS_URL
     });
@@ -80,6 +85,7 @@ const ensureRedisConnection = async () => {
 
     client.on('end', () => {
       redisState.connected = false;
+      redisState.connectPromise = null;
       redisState.mode = process.env.REDIS_URL ? 'redis' : 'memory';
     });
 
@@ -88,6 +94,7 @@ const ensureRedisConnection = async () => {
         redisState.client = client;
         redisState.connected = true;
         redisState.mode = 'redis';
+        redisState.connectPromise = null;
         return {
           mode: 'redis',
           client
@@ -359,6 +366,38 @@ if (typeof cleanupInterval.unref === 'function') {
 
 const cacheService = {
   connect: ensureRedisConnection,
+  async disconnect() {
+    const pendingConnection = redisState.connectPromise;
+    let client = redisState.client;
+
+    if (!client && pendingConnection) {
+      try {
+        const connection = await pendingConnection;
+        client = connection?.client || redisState.client;
+      } catch (error) {
+        client = redisState.client;
+      }
+    }
+
+    redisState.client = null;
+    redisState.connectPromise = null;
+    redisState.connected = false;
+    redisState.mode = process.env.REDIS_URL ? 'redis' : 'memory';
+
+    if (!client) {
+      return;
+    }
+
+    try {
+      if (client.isOpen) {
+        await client.quit();
+      }
+    } catch (error) {
+      if (client.isOpen) {
+        client.disconnect();
+      }
+    }
+  },
   getStatus() {
     return {
       mode: redisState.mode,

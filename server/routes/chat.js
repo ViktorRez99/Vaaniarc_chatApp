@@ -45,6 +45,7 @@ const {
 const {
   resolveStoredTextContent
 } = require('../utils/secureMessaging');
+const { normalizeForwardedFrom } = require('../utils/forwardedMessage');
 
 const emitPrivateMessageEvent = (req, chat, eventName, payload) => {
   const io = req.app.get('io');
@@ -63,7 +64,7 @@ router.get('/chats', async (req, res) => {
     const userId = req.user._id;
     
     const chats = await Chat.find({ participants: userId })
-      .populate('participants', 'username avatar status')
+      .populate('participants', 'username avatar status firstName lastName')
       .populate({
         path: 'lastMessage',
         select: PRIVATE_MESSAGE_SELECT
@@ -134,7 +135,7 @@ router.post('/chats', async (req, res) => {
       }
 
       chat = await Chat.findById(legacyChatId)
-        .populate('participants', 'username avatar status')
+        .populate('participants', 'username avatar status firstName lastName')
         .populate({
           path: 'lastMessage',
           select: PRIVATE_MESSAGE_SELECT
@@ -156,7 +157,7 @@ router.post('/chats', async (req, res) => {
             setDefaultsOnInsert: true
           }
         )
-          .populate('participants', 'username avatar status')
+          .populate('participants', 'username avatar status firstName lastName')
           .populate({
             path: 'lastMessage',
             select: PRIVATE_MESSAGE_SELECT
@@ -167,7 +168,7 @@ router.post('/chats', async (req, res) => {
         }
 
         chat = await Chat.findOne({ participantHash })
-          .populate('participants', 'username avatar status')
+          .populate('participants', 'username avatar status firstName lastName')
           .populate({
             path: 'lastMessage',
             select: PRIVATE_MESSAGE_SELECT
@@ -224,6 +225,40 @@ router.get('/chats/:chatId/messages', async (req, res) => {
   }
 });
 
+router.get('/chats/:chatId/messages/pinned', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const userId = req.user._id;
+
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ message: 'Chat not found' });
+    }
+
+    if (!arrayIncludesId(chat.participants, userId)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const query = buildActiveMessageQuery({
+      chatId,
+      isPinned: true
+    });
+
+    const messages = await populatePrivateMessage(
+      PrivateMessage.find(query)
+        .sort({ pinnedAt: -1, createdAt: -1 })
+        .limit(10)
+    );
+
+    res.json({
+      messages: serializePrivateMessagesForUser(messages, userId)
+    });
+  } catch (error) {
+    console.error('Error fetching pinned private messages:', error);
+    res.status(500).json({ message: 'Failed to fetch pinned messages' });
+  }
+});
+
 // Send a message in a chat
 router.post('/chats/:chatId/messages', async (req, res) => {
   try {
@@ -236,13 +271,15 @@ router.post('/chats/:chatId/messages', async (req, res) => {
       expiresInSeconds,
       isViewOnce,
       replyTo,
-      tempId
+      tempId,
+      forwardedFrom
     } = req.body;
     const userId = req.user._id;
     const storedContent = resolveStoredTextContent({
       plaintext: content,
       encryptedContent
     });
+    const normalizedForwardedFrom = normalizeForwardedFrom(forwardedFrom);
     const payloadValidation = validateDeviceBoundPayload({
       encryptedContent,
       authenticatedDeviceId: req.deviceId || null,
@@ -313,6 +350,7 @@ router.post('/chats/:chatId/messages', async (req, res) => {
       messageType,
       fileUrl,
       replyTo: replyTo || null,
+      forwardedFrom: normalizedForwardedFrom,
       ...privacyFields
     });
 
@@ -434,6 +472,68 @@ router.post('/chats/:chatId/messages/:messageId/consume-view-once', async (req, 
   } catch (error) {
     console.error('Error consuming view-once message:', error);
     res.status(500).json({ message: 'Failed to consume the view-once attachment' });
+  }
+});
+
+router.patch('/chat/messages/:messageId/pin', async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const requestedPinnedState = req.body?.isPinned;
+    const userId = req.user._id;
+    const idempotencyKey = requireIdempotencyKey(req, res);
+
+    if (!idempotencyKey) {
+      return;
+    }
+
+    const cachedPayload = await loadIdempotentResponse({
+      scope: `private-message-pin:${messageId}`,
+      userId,
+      idempotencyKey
+    });
+    if (cachedPayload) {
+      return res.json(cachedPayload);
+    }
+
+    const message = await PrivateMessage.findById(messageId);
+    if (!message) {
+      return res.status(404).json({ message: 'Message not found' });
+    }
+
+    const chat = await Chat.findById(message.chatId);
+    if (!chat || !arrayIncludesId(chat.participants, userId)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    if (message.isDeleted) {
+      return res.status(400).json({ message: 'Deleted messages cannot be pinned' });
+    }
+
+    const nextPinnedState = typeof requestedPinnedState === 'boolean'
+      ? requestedPinnedState
+      : !message.isPinned;
+
+    message.setPinned(nextPinnedState, userId);
+    await message.save();
+    await populatePrivateMessage(message);
+
+    const payload = {
+      chatId: chat._id.toString(),
+      message: message.toObject()
+    };
+    emitPrivateMessageEvent(req, chat, 'private_message_pin', payload);
+
+    await storeIdempotentResponse({
+      scope: `private-message-pin:${messageId}`,
+      userId,
+      idempotencyKey,
+      payload
+    });
+
+    res.json(payload);
+  } catch (error) {
+    console.error('Error pinning private message:', error);
+    res.status(500).json({ message: 'Failed to update the pinned state' });
   }
 });
 

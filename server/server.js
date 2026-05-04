@@ -7,6 +7,8 @@ const http = require('http');
 const { Server } = require('socket.io');
 
 const authRoutes = require('./routes/auth');
+const authPasskeyRoutes = require('./routes/authPasskeys');
+const authRecoveryRoutes = require('./routes/authRecovery');
 const fileAccessRoutes = require('./routes/fileAccess');
 const uploadRoutes = require('./routes/upload');
 const chatRoutes = require('./routes/chat');
@@ -25,10 +27,11 @@ const authenticateToken = require('./middleware/auth');
 const { apiLimiter } = require('./middleware/rateLimiter');
 const socketAuth = require('./middleware/socketAuth');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
+const { requirePasskeyEnrollment } = require('./utils/passkeyEnrollment');
 const { enqueueBackgroundJob } = require('./services/backgroundJobs');
 const cacheService = require('./services/cacheService');
 const { connectWithRetry, getDatabaseStatus, isDatabaseReady } = require('./services/databaseService');
-const { configureSocketAdapter } = require('./services/socketAdapter');
+const { closeSocketAdapter, configureSocketAdapter } = require('./services/socketAdapter');
 const logger = require('./utils/logger');
 const { arrayIncludesId, normalizeId } = require('./utils/idHelpers');
 const { validateDeviceBoundPayload } = require('./utils/e2eePayloads');
@@ -980,22 +983,24 @@ io.on('connection', (socket) => {
   });
 });
 
+app.use('/api/auth/webauthn', requireDatabaseConnection, authPasskeyRoutes);
+app.use('/api/auth/recovery', requireDatabaseConnection, authenticateToken, requireCsrf, requirePasskeyEnrollment, authRecoveryRoutes);
 app.use('/api/auth', requireDatabaseConnection, authRoutes);
-app.use('/api/2fa', requireDatabaseConnection, twoFactorRoutes);
-app.use('/api/keys', requireDatabaseConnection, keysRoutes);
+app.use('/api/2fa', requireDatabaseConnection, authenticateToken, requireCsrf, requirePasskeyEnrollment, twoFactorRoutes);
+app.use('/api/keys', requireDatabaseConnection, authenticateToken, requireCsrf, requirePasskeyEnrollment, keysRoutes);
 // Public health checks (must be before any app.use('/api', authenticateToken, ...))
 app.use('/api', healthRoutes);
 app.use('/api', requireDatabaseConnection);
 app.use('/api', apiLimiter);
-app.use('/api/devices', authenticateToken, requireCsrf, deviceRoutes);
-app.use('/api', authenticateToken, requireCsrf, notificationRoutes);
-app.use('/api/upload', authenticateToken, requireCsrf, uploadRoutes);
-app.use('/api', authenticateToken, requireCsrf, communityRoutes);
-app.use('/api', authenticateToken, requireCsrf, channelRoutes);
-app.use('/api', authenticateToken, requireCsrf, conversationRoutes);
-app.use('/api', authenticateToken, requireCsrf, chatRoutes);
-app.use('/api', authenticateToken, requireCsrf, roomRoutes);
-app.use('/api', authenticateToken, requireCsrf, meetingRoutes);
+app.use('/api/devices', authenticateToken, requireCsrf, requirePasskeyEnrollment, deviceRoutes);
+app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, notificationRoutes);
+app.use('/api/upload', authenticateToken, requireCsrf, requirePasskeyEnrollment, uploadRoutes);
+app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, communityRoutes);
+app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, channelRoutes);
+app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, conversationRoutes);
+app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, chatRoutes);
+app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, roomRoutes);
+app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, meetingRoutes);
 
 app.use(/^\/api(?:\/.*)?$/, notFoundHandler);
 app.use(errorHandler);
@@ -1051,6 +1056,33 @@ const startServer = async () => {
   logger.info('Environment: ' + (process.env.NODE_ENV || 'development'));
 };
 
+let shutdownInProgress = false;
+const shutdownServer = async (reason = 'shutdown') => {
+  if (shutdownInProgress) {
+    return;
+  }
+
+  shutdownInProgress = true;
+  logger.info(`Server ${reason} started`);
+
+  io.close();
+
+  if (server.listening) {
+    await new Promise((resolve) => {
+      server.close(resolve);
+    });
+  }
+
+  await closeSocketAdapter();
+  await cacheService.disconnect();
+
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.connection.close(false);
+  }
+
+  logger.info(`Server ${reason} completed`);
+};
+
 if (process.env.NODE_ENV !== 'test') {
   startServer().catch((error) => {
     if (error?.code === 'EADDRINUSE') {
@@ -1058,8 +1090,19 @@ if (process.env.NODE_ENV !== 'test') {
     } else {
       logger.error('Server startup failed', error);
     }
-    process.exitCode = 1;
+    process.exit(1);
+  });
+
+  ['SIGTERM', 'SIGINT'].forEach((signal) => {
+    process.once(signal, () => {
+      shutdownServer(signal)
+        .then(() => process.exit(0))
+        .catch((error) => {
+          logger.error('Server shutdown failed', error);
+          process.exit(1);
+        });
+    });
   });
 }
 
-module.exports = { app, server, io };
+module.exports = { app, server, io, shutdownServer };

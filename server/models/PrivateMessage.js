@@ -101,6 +101,30 @@ const privateMessageSchema = new mongoose.Schema({
     ref: 'PrivateMessage',
     default: null
   },
+  forwardedFrom: {
+    originalMessageId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null
+    },
+    originalSender: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null
+    },
+    originalSenderName: {
+      type: String,
+      default: ''
+    },
+    sourceType: {
+      type: String,
+      enum: ['chat', 'room'],
+      default: 'chat'
+    },
+    sourceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null
+    }
+  },
   isEdited: {
     type: Boolean,
     default: false
@@ -124,6 +148,19 @@ const privateMessageSchema = new mongoose.Schema({
   readAt: {
     type: Date,
     default: null
+  },
+  isPinned: {
+    type: Boolean,
+    default: false
+  },
+  pinnedAt: {
+    type: Date,
+    default: null
+  },
+  pinnedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
   }
 }, {
   timestamps: true
@@ -136,6 +173,7 @@ privateMessageSchema.index({ sender: 1, createdAt: -1 });
 privateMessageSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 privateMessageSchema.index({ chatId: 1, sender: 1, tempId: 1 }, { sparse: true });
 privateMessageSchema.index({ replyTo: 1, createdAt: -1 });
+privateMessageSchema.index({ chatId: 1, isPinned: -1, pinnedAt: -1, createdAt: -1 });
 
 privateMessageSchema.methods.addReaction = function addReaction(userId, emoji) {
   const existingReaction = this.reactions.find((reaction) => (
@@ -171,10 +209,19 @@ privateMessageSchema.methods.softDelete = function softDelete() {
   this.isDeleted = true;
   this.deletedAt = new Date();
   this.revocableUntil = new Date();
+  this.isPinned = false;
+  this.pinnedAt = null;
+  this.pinnedBy = null;
   this.content = 'This message has been deleted';
   this.encryptedContent = null;
   this.fileUrl = null;
   this.fileMetadata = null;
+};
+
+privateMessageSchema.methods.setPinned = function setPinned(nextPinned, userId) {
+  this.isPinned = Boolean(nextPinned);
+  this.pinnedAt = this.isPinned ? new Date() : null;
+  this.pinnedBy = this.isPinned ? userId : null;
 };
 
 privateMessageSchema.methods.canEdit = function canEdit(userId) {

@@ -49,7 +49,30 @@ const getSocketAdapterStatus = () => ({
   ...adapterStatus
 });
 
+const closeSocketAdapter = async () => {
+  if (!subClient) {
+    return;
+  }
+
+  const client = subClient;
+  subClient = null;
+
+  try {
+    if (client.isOpen) {
+      await client.quit();
+    }
+  } catch (error) {
+    if (client.isOpen) {
+      client.disconnect();
+    }
+  } finally {
+    adapterStatus.mode = 'memory';
+    adapterStatus.enabled = false;
+  }
+};
+
 module.exports = {
+  closeSocketAdapter,
   configureSocketAdapter,
   getSocketAdapterStatus
 };

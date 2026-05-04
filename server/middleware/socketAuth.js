@@ -2,6 +2,7 @@ const Device = require('../models/Device');
 const authenticateToken = require('./auth');
 const cacheService = require('../services/cacheService');
 const { isDatabaseReady } = require('../services/databaseService');
+const { getPasskeyEnrollmentStatus } = require('../utils/passkeyEnrollment');
 
 const socketAuth = async (socket, next) => {
   try {
@@ -30,6 +31,11 @@ const socketAuth = async (socket, next) => {
 
     if (!authContext || authContext.authStrategy !== 'session' || !authContext.session) {
       return next(new Error('Authentication error: Session required'));
+    }
+
+    const passkeyStatus = await getPasskeyEnrollmentStatus(authContext.user._id);
+    if (passkeyStatus.passkeyRequired) {
+      return next(new Error('Authentication error: Passkey setup required'));
     }
 
     socket.userId = authContext.user._id.toString();

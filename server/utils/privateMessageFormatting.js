@@ -25,10 +25,14 @@ const PRIVATE_MESSAGE_SELECT = [
   'viewedBy',
   'reactions',
   'replyTo',
+  'forwardedFrom',
   'isEdited',
   'editedAt',
   'isDeleted',
-  'deletedAt'
+  'deletedAt',
+  'isPinned',
+  'pinnedAt',
+  'pinnedBy'
 ].join(' ');
 
 const PRIVATE_MESSAGE_REPLY_SELECT = [
@@ -44,7 +48,8 @@ const PRIVATE_MESSAGE_REPLY_SELECT = [
   'sender',
   'isEdited',
   'isDeleted',
-  'createdAt'
+  'createdAt',
+  'forwardedFrom'
 ].join(' ');
 
 const PRIVATE_MESSAGE_POPULATE = [
@@ -52,13 +57,27 @@ const PRIVATE_MESSAGE_POPULATE = [
   {
     path: 'replyTo',
     select: PRIVATE_MESSAGE_REPLY_SELECT,
-    populate: {
-      path: 'sender',
-      select: 'username avatar'
-    }
+    populate: [
+      {
+        path: 'sender',
+        select: 'username avatar'
+      },
+      {
+        path: 'forwardedFrom.originalSender',
+        select: 'username avatar'
+      }
+    ]
   },
   {
     path: 'reactions.user',
+    select: 'username avatar'
+  },
+  {
+    path: 'pinnedBy',
+    select: 'username avatar'
+  },
+  {
+    path: 'forwardedFrom.originalSender',
     select: 'username avatar'
   }
 ];

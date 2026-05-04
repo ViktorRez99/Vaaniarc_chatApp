@@ -131,7 +131,7 @@ router.get('/conversations', async (req, res) => {
 
     const [chats, rooms, channels] = await Promise.all([
       Chat.find({ participants: userId })
-        .populate('participants', 'username avatar status')
+        .populate('participants', 'username avatar status firstName lastName')
         .populate({
           path: 'lastMessage',
           select: DIRECT_MESSAGE_FIELDS
@@ -219,7 +219,7 @@ router.post('/conversations', async (req, res) => {
         type: 'private',
         participants: { $all: [userId, recipientId], $size: 2 }
       })
-        .populate('participants', 'username avatar status')
+        .populate('participants', 'username avatar status firstName lastName')
         .populate({
           path: 'lastMessage',
           select: DIRECT_MESSAGE_FIELDS
@@ -232,7 +232,7 @@ router.post('/conversations', async (req, res) => {
         });
 
         chat = await Chat.findById(chat._id)
-          .populate('participants', 'username avatar status')
+          .populate('participants', 'username avatar status firstName lastName')
           .populate({
             path: 'lastMessage',
             select: DIRECT_MESSAGE_FIELDS
