@@ -55,7 +55,9 @@ const PwaRuntimeBanner = () => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.getRegistration().then((registration) => {
         detachRegistrationListener = inspectRegistration(registration);
-      }).catch(() => {});
+      }).catch((error) => {
+        console.warn('Failed to inspect service worker registration:', error);
+      });
 
       navigator.serviceWorker.addEventListener('controllerchange', handleControllerChange);
     }

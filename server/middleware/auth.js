@@ -1,5 +1,4 @@
 const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
 
 const Session = require('../models/Session');
 const User = require('../models/User');
@@ -298,26 +297,6 @@ const loadUserForSessionToken = async (sessionToken) => {
   };
 };
 
-const loadUserForBearerToken = async (authorizationHeader) => {
-  const token = authorizationHeader && authorizationHeader.split(' ')[1];
-  if (!token) {
-    return null;
-  }
-
-  const decoded = jwt.verify(token, process.env.JWT_SECRET);
-  const user = await User.findById(decoded.userId).select('-password');
-
-  if (!user || !user.isActive) {
-    return null;
-  }
-
-  return {
-    authStrategy: 'bearer_legacy',
-    session: null,
-    user
-  };
-};
-
 const attachAuthContext = async (req, authContext) => {
   req.user = authContext.user;
   req.session = authContext.session || null;
@@ -329,26 +308,7 @@ const attachAuthContext = async (req, authContext) => {
   }
 };
 
-const getAuthFailure = (req, error = null) => {
-  if (error?.name === 'JsonWebTokenError') {
-    return { status: 401, body: { message: 'Invalid token' } };
-  }
-
-  if (error?.name === 'TokenExpiredError') {
-    return { status: 401, body: { message: 'Token expired' } };
-  }
-
-  const cookies = parseCookieHeader(req.headers.cookie || '');
-  if (cookies[SESSION_COOKIE_NAME]) {
-    return { status: 401, body: { message: 'Session expired. Please sign in again.' } };
-  }
-
-  if (req.headers.authorization) {
-    return { status: 401, body: { message: 'Invalid token' } };
-  }
-
-  return { status: 401, body: { message: 'Access token or session required' } };
-};
+const getAuthFailure = () => ({ status: 401, body: { message: 'Authentication required.' } });
 
 const resolveAuthentication = async (req) => {
   const cookies = parseCookieHeader(req.headers.cookie || '');
@@ -357,7 +317,7 @@ const resolveAuthentication = async (req) => {
     return sessionAuth;
   }
 
-  return loadUserForBearerToken(req.headers.authorization);
+  return null;
 };
 
 const authenticateToken = async (req, res, next) => {
@@ -397,7 +357,7 @@ const requireCsrf = (req, res, next) => {
   }
 
   if (!req.session || req.authStrategy !== 'session') {
-    return next();
+    return res.status(403).json({ message: 'CSRF token required' });
   }
 
   const cookies = parseCookieHeader(req.headers.cookie || '');

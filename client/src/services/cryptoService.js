@@ -844,9 +844,16 @@ const cryptoService = {
       return null;
     }
 
+    const parsedPublicJwk = parsePayload(publicJwk);
+    const parsedPrivateJwk = parsePayload(privateJwk);
+
+    if (!parsedPublicJwk || !parsedPrivateJwk) {
+      return null;
+    }
+
     return {
-      publicJwk: JSON.parse(publicJwk),
-      privateJwk: JSON.parse(privateJwk)
+      publicJwk: parsedPublicJwk,
+      privateJwk: parsedPrivateJwk
     };
   },
 
@@ -1738,7 +1745,8 @@ const cryptoService = {
         backupKey,
         arrayBufferFromBase64(parsedBackup.ciphertext)
       );
-    } catch {
+    } catch (error) {
+      console.error('Failed to decrypt encryption backup:', error);
       throw new Error('Backup passphrase is incorrect or the backup file is corrupted.');
     }
 
@@ -3151,7 +3159,7 @@ const cryptoService = {
     }
 
     if (message.encryptedContent) {
-      const decryptedContent = await this.decryptTextPayload(message.encryptedContent);
+      const decryptedContent = await this.decryptTextPayload(message.encryptedContent) || message.decryptedContent || null;
       nextMessage = {
         ...nextMessage,
         decryptedContent,
@@ -3235,7 +3243,7 @@ const cryptoService = {
       return nextMessage;
     }
 
-    const decryptedContent = await this.decryptTextPayload(message.encryptedContent);
+    const decryptedContent = await this.decryptTextPayload(message.encryptedContent) || message.decryptedContent || null;
     nextMessage.decryptedContent = decryptedContent;
     nextMessage.content.text = decryptedContent || '[Encrypted message unavailable on this device]';
     return nextMessage;

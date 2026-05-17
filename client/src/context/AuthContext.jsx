@@ -173,7 +173,7 @@ const getEncryptionIssue = (nextEncryptionState) => {
   });
 };
 
-const isMissingSessionError = (error) => /session required|access token or session required|session expired/i.test(
+const isMissingSessionError = (error) => /authentication required|session required|access token or session required|session expired/i.test(
   String(error?.message || '')
 );
 
@@ -188,6 +188,18 @@ const isTransientSessionRestoreError = (error) => {
 };
 
 const userRequiresPasskeyEnrollment = (user) => Boolean(user?.passkeyRequired);
+const normalizeAuthUser = (user) => {
+  if (!user) {
+    return user;
+  }
+
+  const normalizedId = String(user._id || user.id || '');
+  return {
+    ...user,
+    _id: normalizedId,
+    id: normalizedId
+  };
+};
 
 const initialState = {
   user: null,
@@ -506,12 +518,13 @@ export const AuthProvider = ({ children }) => {
         }
 
         clearSessionRestoreState();
+        const nextUser = normalizeAuthUser(response.user);
         dispatch({
           type: AUTH_ACTIONS.LOGIN_SUCCESS,
-          payload: { user: response.user }
+          payload: { user: nextUser }
         });
-        if (!userRequiresPasskeyEnrollment(response.user)) {
-          scheduleRuntimeBootstrap(response.user, { reason: 'session-restore' });
+        if (!userRequiresPasskeyEnrollment(nextUser)) {
+          scheduleRuntimeBootstrap(nextUser, { reason: 'session-restore' });
         } else {
           resetRuntimeState();
         }
@@ -661,18 +674,24 @@ export const AuthProvider = ({ children }) => {
 
     try {
       const response = await apiService.login(credentials);
+      if (response?.requires2FA) {
+        dispatch({ type: AUTH_ACTIONS.SET_LOADING, payload: false });
+        return response;
+      }
+
+      const nextUser = normalizeAuthUser(response.user);
       clearSessionRestoreState();
       dispatch({
         type: AUTH_ACTIONS.LOGIN_SUCCESS,
-        payload: { user: response.user }
+        payload: { user: nextUser }
       });
-      if (userRequiresPasskeyEnrollment(response.user)) {
+      if (userRequiresPasskeyEnrollment(nextUser)) {
         resetRuntimeState();
       } else {
         runtimeCoordinator.publish('auth:login', {
-          userId: response.user?.id || response.user?._id || null
+          userId: nextUser?.id || nextUser?._id || null
         });
-        scheduleRuntimeBootstrap(response.user, { reason: 'login' });
+        scheduleRuntimeBootstrap(nextUser, { reason: 'login' });
       }
       return response;
     } catch (error) {
@@ -693,18 +712,19 @@ export const AuthProvider = ({ children }) => {
 
     try {
       const response = await apiService.register(userData);
+      const nextUser = normalizeAuthUser(response.user);
       clearSessionRestoreState();
       dispatch({
         type: AUTH_ACTIONS.REGISTER_SUCCESS,
-        payload: { user: response.user }
+        payload: { user: nextUser }
       });
-      if (userRequiresPasskeyEnrollment(response.user)) {
+      if (userRequiresPasskeyEnrollment(nextUser)) {
         resetRuntimeState();
       } else {
         runtimeCoordinator.publish('auth:login', {
-          userId: response.user?.id || response.user?._id || null
+          userId: nextUser?.id || nextUser?._id || null
         });
-        scheduleRuntimeBootstrap(response.user, { reason: 'register' });
+        scheduleRuntimeBootstrap(nextUser, { reason: 'register' });
       }
       return response;
     } catch (error) {
@@ -725,15 +745,58 @@ export const AuthProvider = ({ children }) => {
 
     try {
       const response = await passkeyService.authenticate(identifier);
+      if (response?.requires2FA) {
+        dispatch({ type: AUTH_ACTIONS.SET_LOADING, payload: false });
+        return response;
+      }
+
+      const nextUser = normalizeAuthUser(response.user);
       clearSessionRestoreState();
       dispatch({
         type: AUTH_ACTIONS.LOGIN_SUCCESS,
-        payload: { user: response.user }
+        payload: { user: nextUser }
       });
-      runtimeCoordinator.publish('auth:login', {
-        userId: response.user?.id || response.user?._id || null
+      if (userRequiresPasskeyEnrollment(nextUser)) {
+        resetRuntimeState();
+      } else {
+        runtimeCoordinator.publish('auth:login', {
+          userId: nextUser?.id || nextUser?._id || null
+        });
+        scheduleRuntimeBootstrap(nextUser, { reason: 'passkey-login' });
+      }
+      return response;
+    } catch (error) {
+      socketService.disconnect();
+      clearLoadedCryptoIdentity();
+      resetRuntimeState();
+      dispatch({
+        type: AUTH_ACTIONS.LOGIN_FAILURE,
+        payload: error.message
       });
-      scheduleRuntimeBootstrap(response.user, { reason: 'passkey-login' });
+      throw error;
+    }
+  };
+
+  const verifyTwoFactorLogin = async ({ partialToken, token }) => {
+    clearSessionRestoreState();
+    dispatch({ type: AUTH_ACTIONS.LOGIN_START });
+
+    try {
+      const response = await apiService.verifyTwoFactorLogin({ partialToken, token });
+      const nextUser = normalizeAuthUser(response.user);
+      clearSessionRestoreState();
+      dispatch({
+        type: AUTH_ACTIONS.LOGIN_SUCCESS,
+        payload: { user: nextUser }
+      });
+      if (userRequiresPasskeyEnrollment(nextUser)) {
+        resetRuntimeState();
+      } else {
+        runtimeCoordinator.publish('auth:login', {
+          userId: nextUser?.id || nextUser?._id || null
+        });
+        scheduleRuntimeBootstrap(nextUser, { reason: '2fa-login' });
+      }
       return response;
     } catch (error) {
       socketService.disconnect();
@@ -749,20 +812,21 @@ export const AuthProvider = ({ children }) => {
 
   const refreshPasskeyEnrollment = async () => {
     const response = await apiService.verifyToken();
+    const nextUser = normalizeAuthUser(response.user);
 
     dispatch({
       type: AUTH_ACTIONS.LOGIN_SUCCESS,
-      payload: { user: response.user }
+      payload: { user: nextUser }
     });
 
-    if (!userRequiresPasskeyEnrollment(response.user)) {
+    if (!userRequiresPasskeyEnrollment(nextUser)) {
       runtimeCoordinator.publish('auth:login', {
-        userId: response.user?.id || response.user?._id || null
+        userId: nextUser?.id || nextUser?._id || null
       });
-      scheduleRuntimeBootstrap(response.user, { reason: 'passkey-enrolled' });
+      scheduleRuntimeBootstrap(nextUser, { reason: 'passkey-enrolled' });
     }
 
-    return response.user;
+    return nextUser;
   };
 
   const logout = async () => {
@@ -788,12 +852,13 @@ export const AuthProvider = ({ children }) => {
   const updateProfile = async (profileData) => {
     try {
       const response = await apiService.updateProfile(profileData);
+      const nextUser = normalizeAuthUser(response.user);
       dispatch({
         type: AUTH_ACTIONS.UPDATE_PROFILE,
-        payload: response.user
+        payload: nextUser
       });
       runtimeCoordinator.publish('profile:update', {
-        user: response.user
+        user: nextUser
       });
       return response;
     } catch (error) {
@@ -1006,6 +1071,7 @@ export const AuthProvider = ({ children }) => {
     runtimeDiagnostics,
     login,
     loginWithPasskey,
+    verifyTwoFactorLogin,
     register,
     logout,
     updateProfile,

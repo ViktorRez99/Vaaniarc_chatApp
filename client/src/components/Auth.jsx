@@ -1,9 +1,10 @@
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useId } from "react"
 import { useLocation, useNavigate } from "react-router-dom"
 import { motion, AnimatePresence } from "framer-motion"
 import Cropper from 'react-easy-crop'
 import getCroppedImg from '../utils/cropImage'
 import { useAuth } from "../context/AuthContext"
+import api from "../services/api"
 import passkeyService from "../services/passkeys"
 import { PASSWORD_POLICY, validatePassword } from "../utils/passwordPolicy"
 import {
@@ -217,6 +218,8 @@ const PasswordStrength = ({ password }) => {
 const FormField = ({ label, type = "text", name, value, onChange, placeholder, required, minLength, maxLength, rows, showPasswordStrength, shake, autoComplete, icon: Icon }) => {
   const [showPassword, setShowPassword] = useState(false)
   const [focused, setFocused] = useState(false)
+  const generatedId = useId()
+  const fieldId = `${name}-${generatedId}`
   const hasValue = !!value
   const isFloating = focused || hasValue
   const InputComponent = rows ? "textarea" : "input"
@@ -235,7 +238,7 @@ const FormField = ({ label, type = "text", name, value, onChange, placeholder, r
         )}
 
         <motion.label
-          htmlFor={name}
+          htmlFor={fieldId}
           className="absolute font-mono uppercase tracking-[0.12em] pointer-events-none origin-left z-10"
           style={{ left: Icon ? 42 : 16 }}
           animate={{
@@ -254,7 +257,7 @@ const FormField = ({ label, type = "text", name, value, onChange, placeholder, r
 
         <InputComponent
           type={type === "password" ? (showPassword ? "text" : "password") : type}
-          id={name}
+          id={fieldId}
           name={name}
           value={value}
           onChange={onChange}
@@ -356,14 +359,20 @@ const Auth = () => {
   const navigate = useNavigate()
   const urlParams = new URLSearchParams(location.search)
   const shouldSignup = urlParams.get("signup") === "true"
+  const resetTokenFromUrl = urlParams.get("resetToken") || ""
   const [isLogin, setIsLogin] = useState(!shouldSignup)
   const [step, setStep] = useState(1)
   const [formData, setFormData] = useState(createInitialFormData)
   const [formError, setFormError] = useState("")
+  const [formInfo, setFormInfo] = useState("")
+  const [passwordRecoveryMode, setPasswordRecoveryMode] = useState(resetTokenFromUrl ? "reset" : "auth")
+  const [passwordResetToken, setPasswordResetToken] = useState(resetTokenFromUrl)
   const [isSuccess, setIsSuccess] = useState(false)
-  const { login, loginWithPasskey, register, isLoading, error, clearError } = useAuth()
+  const { login, loginWithPasskey, verifyTwoFactorLogin, register, isLoading, error, clearError } = useAuth()
   const authError = formError || error
   const [passkeySupported] = useState(() => passkeyService.isSupported())
+  const [twoFactorChallenge, setTwoFactorChallenge] = useState(null)
+  const [twoFactorCode, setTwoFactorCode] = useState("")
 
   /* Passkey enrollment state */
   const [isEnrollingPasskey, setIsEnrollingPasskey] = useState(false)
@@ -380,26 +389,39 @@ const Auth = () => {
     setIsLogin(!shouldSignup)
     setStep(1)
     setFormError("")
+    setFormInfo("")
     setPasskeyError("")
     setIsEnrollingPasskey(false)
+    setTwoFactorChallenge(null)
+    setTwoFactorCode("")
+    setPasswordRecoveryMode(resetTokenFromUrl ? "reset" : "auth")
+    setPasswordResetToken(resetTokenFromUrl)
     clearError()
-  }, [shouldSignup, clearError])
+  }, [shouldSignup, resetTokenFromUrl, clearError])
 
   const onCropComplete = useCallback((_, px) => setCroppedAreaPixels(px), [])
   const readFile = (f) => new Promise((r) => { const rd = new FileReader(); rd.addEventListener("load", () => r(rd.result), false); rd.readAsDataURL(f) })
   const onFileChange = async (e) => { if (e.target.files?.[0]) { const d = await readFile(e.target.files[0]); setImageSrc(d); setIsCropping(true) } }
   const showCroppedImage = async () => {
     try { const c = await getCroppedImg(imageSrc, croppedAreaPixels); setFormData((p) => ({ ...p, avatar: c })); setIsCropping(false); setImageSrc(null) }
-    catch { setFormError("Failed to crop image.") }
+    catch (cropError) {
+      console.error("Failed to crop avatar image:", cropError)
+      setFormError("Failed to crop image.")
+    }
   }
   const cancelCrop = () => { setIsCropping(false); setImageSrc(null) }
 
   const handleInputChange = useCallback((e) => {
     const { name, value } = e.target
     setFormData((p) => ({ ...p, [name]: value }))
+    if (name === "username" || name === "password") {
+      setTwoFactorChallenge(null)
+      setTwoFactorCode("")
+    }
     if (error) clearError()
     if (formError) setFormError("")
-  }, [clearError, error, formError])
+    if (formInfo) setFormInfo("")
+  }, [clearError, error, formError, formInfo])
 
   const handleAvatarSelect = (url) => setFormData((p) => ({ ...p, avatar: url }))
 
@@ -437,11 +459,53 @@ const Auth = () => {
   const handleSubmit = async (e) => {
     e.preventDefault()
     setFormError("")
+    setFormInfo("")
     try {
       let response
+      if (passwordRecoveryMode === "forgot") {
+        const identifier = formData.username.trim() || formData.email.trim()
+        if (!identifier) {
+          setFormError("Enter your username or email.")
+          return
+        }
+        response = await api.requestPasswordReset({ identifier })
+        setFormInfo(response?.passwordReset?.resetUrl
+          ? `Reset link prepared: ${response.passwordReset.resetUrl}`
+          : response?.message || "If that account exists, a reset link has been prepared.")
+        return
+      }
+
+      if (passwordRecoveryMode === "reset") {
+        const token = passwordResetToken.trim()
+        const pv = validatePassword(formData.password)
+        if (!token) {
+          setFormError("Password reset token is missing.")
+          return
+        }
+        if (!pv.isValid) {
+          setFormError(pv.error)
+          return
+        }
+        response = await api.resetPassword({ token, newPassword: formData.password })
+        setFormData(createInitialFormData())
+        setPasswordRecoveryMode("auth")
+        setPasswordResetToken("")
+        navigate("/auth", { replace: true })
+        setFormInfo(response?.message || "Password reset successfully. Sign in with the new password.")
+        return
+      }
+
       if (isLogin) {
         if (!formData.username.trim() || !formData.password) { setFormError("Username/email and password are required."); return }
         response = await login({ identifier: formData.username.trim(), password: formData.password })
+        if (response?.requires2FA) {
+          setTwoFactorChallenge({
+            partialToken: response.partialToken,
+            message: response.message || "Enter your authenticator code to continue."
+          })
+          setTwoFactorCode("")
+          return
+        }
         setIsSuccess(true)
         await new Promise((r) => setTimeout(r, 1000))
         navigate(response?.user?.passkeyRequired ? "/passkey-setup" : "/chat")
@@ -472,14 +536,53 @@ const Auth = () => {
   }
 
   const handlePasskeySignIn = async () => {
+    if (!formData.username.trim()) {
+      setFormError("Enter your username before using a passkey.")
+      return
+    }
     setFormError("")
     try {
-      await loginWithPasskey(formData.username.trim())
+      const response = await loginWithPasskey(formData.username.trim())
+      if (response?.requires2FA) {
+        setTwoFactorChallenge({
+          partialToken: response.partialToken,
+          message: response.message || "Enter your authenticator code to continue."
+        })
+        setTwoFactorCode("")
+        return
+      }
       setIsSuccess(true)
       await new Promise((r) => setTimeout(r, 1200))
       navigate("/chat")
     } catch (err) {
       setFormError(err.message || "Passkey sign-in failed.")
+    }
+  }
+
+  const handleVerifyTwoFactor = async (e) => {
+    e.preventDefault()
+    setFormError("")
+
+    if (!twoFactorChallenge?.partialToken) {
+      setFormError("Start sign-in again before entering your 2FA code.")
+      return
+    }
+
+    if (!twoFactorCode.trim()) {
+      setFormError("Enter your 2FA code.")
+      return
+    }
+
+    try {
+      const response = await verifyTwoFactorLogin({
+        partialToken: twoFactorChallenge.partialToken,
+        token: twoFactorCode.trim()
+      })
+      setIsSuccess(true)
+      await new Promise((r) => setTimeout(r, 1000))
+      navigate(response?.user?.passkeyRequired ? "/passkey-setup" : "/chat")
+    } catch (err) {
+      setFormError(err.message || "2FA verification failed.")
     }
   }
 
@@ -503,8 +606,13 @@ const Auth = () => {
     setStep(1)
     setFormData(createInitialFormData())
     setFormError("")
+    setFormInfo("")
     setPasskeyError("")
     setIsEnrollingPasskey(false)
+    setTwoFactorChallenge(null)
+    setTwoFactorCode("")
+    setPasswordRecoveryMode("auth")
+    setPasswordResetToken("")
     clearError()
   }, [clearError, navigate])
 
@@ -604,17 +712,100 @@ const Auth = () => {
             )}
 
             {/* Form */}
-            <form onSubmit={isLogin ? handleSubmit : step === 3 ? (e) => e.preventDefault() : step === 2 ? handleSubmit : handleNextStep} noValidate>
+            <form onSubmit={isLogin ? (twoFactorChallenge ? handleVerifyTwoFactor : handleSubmit) : step === 3 ? (e) => e.preventDefault() : step === 2 ? handleSubmit : handleNextStep} noValidate>
               <AnimatePresence mode="wait" initial={false}>
                 <motion.div
-                  key={isLogin ? "login" : `signup-${step}`}
+                  key={isLogin ? (twoFactorChallenge ? "login-2fa" : "login") : `signup-${step}`}
                   initial={{ opacity: 0, x: isLogin ? -20 : 20 }}
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: isLogin ? 20 : -20 }}
                   transition={{ duration: 0.35, ease: EASE }}
                 >
                   {/* LOGIN */}
-                  {isLogin && (
+                  {isLogin && twoFactorChallenge && (
+                    <div>
+                      <motion.div
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="mb-5 rounded-[18px] p-4 text-center"
+                        style={{ background: "rgba(0,240,255,0.05)", border: "1px solid rgba(0,240,255,0.16)" }}
+                      >
+                        <ShieldCheck className="mx-auto mb-3 h-8 w-8" style={{ color: "#00F0FF" }} />
+                        <h3 className="mb-1 text-base font-bold" style={{ color: "#fff" }}>Two-factor verification</h3>
+                        <p className="text-xs leading-relaxed" style={{ color: "rgba(255,255,255,0.5)" }}>
+                          {twoFactorChallenge.message}
+                        </p>
+                      </motion.div>
+                      <FormField
+                        label="Authenticator Code"
+                        name="twoFactorCode"
+                        value={twoFactorCode}
+                        onChange={(event) => {
+                          setTwoFactorCode(event.target.value.replace(/\s+/g, ""))
+                          if (formError) setFormError("")
+                        }}
+                        placeholder="123456"
+                        required
+                        maxLength={32}
+                        autoComplete="one-time-code"
+                        icon={ShieldCheck}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTwoFactorChallenge(null)
+                          setTwoFactorCode("")
+                          setFormError("")
+                        }}
+                        className="mt-1 text-xs font-medium cursor-pointer bg-transparent border-none transition-colors hover:text-white"
+                        style={{ color: "rgba(255,255,255,0.42)" }}
+                      >
+                        Use a different sign-in method
+                      </button>
+                    </div>
+                  )}
+
+                  {isLogin && !twoFactorChallenge && passwordRecoveryMode === "forgot" && (
+                    <div>
+                      <FormField label="Username or Email" name="username" value={formData.username} onChange={handleInputChange} placeholder="Enter username or email" required autoComplete="username" icon={Mail} />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPasswordRecoveryMode("auth")
+                          setFormError("")
+                          setFormInfo("")
+                        }}
+                        className="mt-1 text-xs font-medium cursor-pointer bg-transparent border-none transition-colors hover:text-white"
+                        style={{ color: "rgba(255,255,255,0.42)" }}
+                      >
+                        Back to sign in
+                      </button>
+                    </div>
+                  )}
+
+                  {isLogin && !twoFactorChallenge && passwordRecoveryMode === "reset" && (
+                    <div>
+                      {!resetTokenFromUrl && (
+                        <FormField label="Reset Token" name="resetToken" value={passwordResetToken} onChange={(event) => setPasswordResetToken(event.target.value)} placeholder="Paste reset token" required icon={ShieldCheck} />
+                      )}
+                      <FormField label="New Password" type="password" name="password" value={formData.password} onChange={handleInputChange} placeholder="Create a new password" required minLength={PASSWORD_POLICY.minLength} showPasswordStrength autoComplete="new-password" icon={KeyRound} />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPasswordRecoveryMode("forgot")
+                          setPasswordResetToken("")
+                          setFormError("")
+                          setFormInfo("")
+                        }}
+                        className="mt-1 text-xs font-medium cursor-pointer bg-transparent border-none transition-colors hover:text-white"
+                        style={{ color: "rgba(255,255,255,0.42)" }}
+                      >
+                        Request a new reset link
+                      </button>
+                    </div>
+                  )}
+
+                  {isLogin && !twoFactorChallenge && passwordRecoveryMode === "auth" && (
                     <div>
                       <FormField label="Username or Email" name="username" value={formData.username} onChange={handleInputChange} placeholder="Enter username or email" required shake={!!authError} autoComplete="username webauthn" icon={User} />
                       {passkeySupported && (
@@ -636,6 +827,18 @@ const Auth = () => {
                         </motion.button>
                       )}
                       <FormField label="Password" type="password" name="password" value={formData.password} onChange={handleInputChange} placeholder="Enter password" required minLength={PASSWORD_POLICY.minLength} shake={!!authError} autoComplete="current-password" icon={KeyRound} />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPasswordRecoveryMode("forgot")
+                          setFormError("")
+                          setFormInfo("")
+                        }}
+                        className="mt-1 text-xs font-medium cursor-pointer bg-transparent border-none transition-colors hover:text-white"
+                        style={{ color: "rgba(255,255,255,0.42)" }}
+                      >
+                        Forgot password?
+                      </button>
                     </div>
                   )}
 
@@ -804,6 +1007,21 @@ const Auth = () => {
                   </motion.div>
                 )}
               </AnimatePresence>
+              <AnimatePresence>
+                {formInfo && step !== 3 && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -6, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.97 }}
+                    transition={{ duration: 0.3, ease: EASE }}
+                    className="flex items-center gap-2.5 p-3.5 mt-5 rounded-[14px] text-xs"
+                    style={{ background: "rgba(0,240,255,0.05)", border: "1.5px solid rgba(0,240,255,0.2)", color: "#00F0FF" }}
+                  >
+                    <ShieldCheck className="w-4 h-4 shrink-0" />
+                    <span className="break-all">{formInfo}</span>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {/* Actions (not on passkey step) */}
               {step !== 3 && (
@@ -842,7 +1060,7 @@ const Auth = () => {
                       <><Loader2 className="w-4 h-4 animate-spin" /><span>Authenticating...</span></>
                     ) : (
                       <>
-                        <span>{isLogin ? "Unlock" : step === 1 ? "Continue" : "Create Account"}</span>
+                        <span>{isLogin ? (twoFactorChallenge ? "Verify Code" : passwordRecoveryMode === "forgot" ? "Send Reset Link" : passwordRecoveryMode === "reset" ? "Reset Password" : "Unlock") : step === 1 ? "Continue" : "Create Account"}</span>
                         <ArrowRight className="w-4 h-4" />
                       </>
                     )}

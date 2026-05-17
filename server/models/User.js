@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 
 const cacheService = require('../services/cacheService');
 const { validatePassword } = require('../utils/validation');
+const logger = require('../utils/logger');
 
 const EMAIL_REGEX = /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/;
 const normalizeOptionalEmail = (value) => {
@@ -33,6 +34,30 @@ const userSchema = new mongoose.Schema({
       },
       message: 'Please enter a valid email'
     }
+  },
+  emailVerified: {
+    type: Boolean,
+    default: false
+  },
+  emailVerificationTokenHash: {
+    type: String,
+    default: null,
+    select: false
+  },
+  emailVerificationExpiresAt: {
+    type: Date,
+    default: null,
+    select: false
+  },
+  passwordResetTokenHash: {
+    type: String,
+    default: null,
+    select: false
+  },
+  passwordResetExpiresAt: {
+    type: Date,
+    default: null,
+    select: false
   },
   firstName: {
     type: String,
@@ -94,6 +119,10 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  tokenVersion: {
+    type: Number,
+    default: 0
+  },
   identityKey: {
     type: String,
     default: null
@@ -119,6 +148,8 @@ const userSchema = new mongoose.Schema({
 userSchema.index({ email: 1 }, { unique: true, sparse: true });
 userSchema.index({ username: 1 });
 userSchema.index({ status: 1, lastSeen: -1 });
+userSchema.index({ emailVerificationTokenHash: 1 }, { sparse: true });
+userSchema.index({ passwordResetTokenHash: 1 }, { sparse: true });
 
 const cleanupUserRelationships = async (userId) => {
   const [
@@ -134,7 +165,9 @@ const cleanupUserRelationships = async (userId) => {
     TwoFactor,
     KeyTransparencyEntry,
     PasskeyCredential,
-    RecoveryKit
+    RecoveryKit,
+    BlockedUser,
+    UserReport
   ] = [
     mongoose.model('Session'),
     mongoose.model('Device'),
@@ -148,7 +181,9 @@ const cleanupUserRelationships = async (userId) => {
     mongoose.model('TwoFactor'),
     mongoose.model('KeyTransparencyEntry'),
     mongoose.model('PasskeyCredential'),
-    mongoose.model('RecoveryKit')
+    mongoose.model('RecoveryKit'),
+    mongoose.model('BlockedUser'),
+    mongoose.model('UserReport')
   ];
 
   const userSessions = await Session.find({ user: userId }).select('tokenHash').lean();
@@ -168,6 +203,11 @@ const cleanupUserRelationships = async (userId) => {
     KeyTransparencyEntry.deleteMany({ user: userId }),
     PasskeyCredential.deleteMany({ user: userId }),
     RecoveryKit.deleteMany({ user: userId }),
+    BlockedUser.deleteMany({ $or: [{ blocker: userId }, { blocked: userId }] }),
+    UserReport.updateMany(
+      { $or: [{ reporter: userId }, { reported: userId }] },
+      { $set: { status: 'resolved' } }
+    ),
     privateChatIds.length ? PrivateMessage.deleteMany({ chatId: { $in: privateChatIds } }) : Promise.resolve(),
     privateChatIds.length ? Chat.deleteMany({ _id: { $in: privateChatIds } }) : Promise.resolve(),
     PrivateMessage.updateMany(
@@ -285,6 +325,9 @@ userSchema.pre('findOneAndDelete', async function(next) {
 
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
+  if (/^\$2[aby]\$\d{2}\$/.test(String(this.password || ''))) {
+    return next();
+  }
 
   try {
     const salt = await bcrypt.genSalt(12);
@@ -299,7 +342,7 @@ userSchema.methods.comparePassword = async function(candidatePassword) {
   try {
     return await bcrypt.compare(candidatePassword, this.password);
   } catch (error) {
-    console.error('Password comparison error:', error);
+    logger.error('Password comparison error', error);
     return false;
   }
 };
@@ -312,6 +355,10 @@ userSchema.methods.updateLastSeen = function() {
 userSchema.methods.toJSON = function() {
   const user = this.toObject();
   delete user.password;
+  delete user.emailVerificationTokenHash;
+  delete user.emailVerificationExpiresAt;
+  delete user.passwordResetTokenHash;
+  delete user.passwordResetExpiresAt;
   return user;
 };
 

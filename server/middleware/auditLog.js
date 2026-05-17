@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const mongoose = require('mongoose');
 
 const auditLogSchema = new mongoose.Schema({
@@ -53,7 +54,7 @@ const auditLog = async (userId, action, details = {}, req = null) => {
 
     await AuditLog.create(logEntry);
   } catch (error) {
-    console.error('Audit log error:', error);
+    logger.error('Audit log error:', error);
   }
 };
 

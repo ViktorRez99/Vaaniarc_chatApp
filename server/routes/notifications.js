@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 
 const Device = require('../models/Device');
@@ -51,7 +52,7 @@ router.post('/notifications/subscribe', async (req, res) => {
       deviceId: device.deviceId
     });
   } catch (error) {
-    console.error('Push subscription save error:', error);
+    logger.error('Push subscription save error:', error);
     res.status(500).json({ message: 'Failed to save push subscription.' });
   }
 });
@@ -79,7 +80,7 @@ router.delete('/notifications/subscribe', async (req, res) => {
       deviceId: device.deviceId
     });
   } catch (error) {
-    console.error('Push subscription delete error:', error);
+    logger.error('Push subscription delete error:', error);
     res.status(500).json({ message: 'Failed to remove push subscription.' });
   }
 });

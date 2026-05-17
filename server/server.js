@@ -1,5 +1,9 @@
 require('dotenv').config();
+const { installSafeConsole } = require('./utils/safeConsole');
+installSafeConsole();
+
 const express = require('express');
+const crypto = require('crypto');
 const cors = require('cors');
 const helmet = require('helmet');
 const mongoose = require('mongoose');
@@ -41,6 +45,7 @@ const { buildPrivacyFields } = require('./utils/messagePrivacy');
 const { detachPrivateReplyThread } = require('./utils/messageThreads');
 const { assertExpectedUpdatedAt } = require('./utils/optimisticLock');
 const { resolveStoredTextContent } = require('./utils/secureMessaging');
+const { isBlockedBetween } = require('./utils/userBlocks');
 const { emitSocketEvent, unpackSocketPayload } = require('./utils/socketPayloads');
 const {
   logMessageDelete,
@@ -58,6 +63,15 @@ const {
 
 const app = express();
 const requireCsrf = authenticateToken.requireCsrf;
+app.use((req, res, next) => {
+  const incomingRequestId = req.headers['x-request-id'] || req.headers['x-amzn-trace-id'];
+  req.requestId = typeof incomingRequestId === 'string' && incomingRequestId.trim()
+    ? incomingRequestId.trim().slice(0, 128)
+    : crypto.randomUUID();
+  res.setHeader('X-Request-Id', req.requestId);
+  next();
+});
+
 const requireDatabaseConnection = (req, res, next) => {
   if (isDatabaseReady()) {
     return next();
@@ -157,6 +171,78 @@ const Channel = require('./models/Channel');
 const Message = require('./models/Message');
 const Meeting = require('./models/Meeting');
 
+const PRESENCE_HEARTBEAT_TTL_MS = Number.parseInt(process.env.PRESENCE_HEARTBEAT_TTL_MS || '', 10) || 90000;
+const PRESENCE_HEARTBEAT_WRITE_INTERVAL_MS = 60000;
+const PRESENCE_SWEEP_INTERVAL_MS = 60000;
+
+const getPresenceHeartbeatKey = (userId) => `presence:heartbeat:${normalizeId(userId)}`;
+
+const touchPresenceHeartbeat = async (socket) => {
+  const userId = socket?.user?._id;
+  const normalizedUserId = normalizeId(userId);
+  if (!normalizedUserId) {
+    return;
+  }
+
+  const now = Date.now();
+  await cacheService.memory.set(getPresenceHeartbeatKey(normalizedUserId), now, PRESENCE_HEARTBEAT_TTL_MS);
+
+  if (now - (socket.lastPresenceWriteAt || 0) < PRESENCE_HEARTBEAT_WRITE_INTERVAL_MS) {
+    return;
+  }
+
+  socket.lastPresenceWriteAt = now;
+  await User.findByIdAndUpdate(userId, {
+    status: 'online',
+    lastSeen: new Date(now)
+  }).catch((err) => logger.error('Presence heartbeat update error', err));
+
+  if (socket.device) {
+    socket.device.lastActive = new Date(now);
+    socket.device.lastIp = socket.handshake.address || socket.device.lastIp;
+    socket.device.save().catch((err) => logger.error('Device heartbeat update error', err));
+  }
+};
+
+const markUserOfflineIfStale = async (userId, username = null) => {
+  const normalizedUserId = normalizeId(userId);
+  if (!normalizedUserId) {
+    return;
+  }
+
+  const localRoom = io.sockets.adapter.rooms.get(`user:${normalizedUserId}`);
+  if (localRoom?.size > 0) {
+    return;
+  }
+
+  const lastHeartbeat = await cacheService.memory.get(getPresenceHeartbeatKey(normalizedUserId));
+  if (lastHeartbeat && Date.now() - Number(lastHeartbeat) < PRESENCE_HEARTBEAT_TTL_MS) {
+    return;
+  }
+
+  await User.findByIdAndUpdate(normalizedUserId, {
+    status: 'offline',
+    lastSeen: new Date()
+  }).catch((err) => logger.error('Presence offline update error', err));
+
+  io.emit('user_offline', { userId: normalizedUserId, username });
+};
+
+const presenceSweepInterval = setInterval(async () => {
+  try {
+    const onlineUsers = await User.find({ status: 'online' }).select('_id username').lean();
+    await Promise.all(
+      onlineUsers.map((onlineUser) => markUserOfflineIfStale(onlineUser._id, onlineUser.username))
+    );
+  } catch (error) {
+    logger.error('Presence sweep error', error);
+  }
+}, PRESENCE_SWEEP_INTERVAL_MS);
+
+if (typeof presenceSweepInterval.unref === 'function') {
+  presenceSweepInterval.unref();
+}
+
 const isMeetingParticipant = (meeting, userId) => {
   if (!meeting || !userId) {
     return false;
@@ -220,7 +306,7 @@ io.on('connection', (socket) => {
   const userSocketRoom = 'user:' + normalizeId(userId);
   const deviceSocketRoom = socket.deviceId ? 'device:' + socket.deviceId : null;
 
-  User.findByIdAndUpdate(userId, { status: 'online' }).catch(err => logger.error('Status update error', err));
+  touchPresenceHeartbeat(socket).catch((err) => logger.error('Initial presence heartbeat error', err));
 
   socket.broadcast.emit('user_online', {
     userId,
@@ -239,6 +325,10 @@ io.on('connection', (socket) => {
     socket.device.save().catch((err) => logger.error('Device activity update error', err));
   }
 
+  socket.on('heartbeat', () => {
+    touchPresenceHeartbeat(socket).catch((err) => logger.error('Socket heartbeat error', err));
+  });
+
   socket.on('private_message', async (data) => {
     try {
       const decodedPayload = unpackSocketPayload(data) || {};
@@ -252,6 +342,10 @@ io.on('connection', (socket) => {
         replyTo,
         tempId
       } = decodedPayload;
+      if (messageType === 'text' && !encryptedContent) {
+        return socket.emit('error', { message: 'Encrypted content is required for direct messages' });
+      }
+
       const storedContent = resolveStoredTextContent({
         plaintext: content,
         encryptedContent
@@ -265,6 +359,11 @@ io.on('connection', (socket) => {
       const chat = await Chat.findById(chatId);
       if (!chat || !arrayIncludesId(chat.participants, userId)) {
         return socket.emit('error', { message: 'Invalid chat' });
+      }
+
+      const otherParticipantId = chat.participants.find((participantId) => !arrayIncludesId([participantId], userId));
+      if (otherParticipantId && await isBlockedBetween(userId, otherParticipantId)) {
+        return socket.emit('error', { message: 'Messaging is unavailable for this chat' });
       }
 
       if (!payloadValidation.isValid) {
@@ -670,6 +769,10 @@ io.on('connection', (socket) => {
     try {
       const decodedPayload = unpackSocketPayload(data) || {};
       const { roomId, content, messageType = 'text', replyTo, encryptedContent, tempId, expiresInSeconds } = decodedPayload;
+      if (messageType === 'text' && !encryptedContent) {
+        return socket.emit('error', { message: 'Encrypted content is required for room messages' });
+      }
+
       const storedText = resolveStoredTextContent({
         plaintext: content,
         encryptedContent
@@ -978,15 +1081,19 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', async () => {
     logger.info('User disconnected', { username: socket.user.username, socketId: socket.id });
-    await User.findByIdAndUpdate(userId, { status: 'offline', lastSeen: new Date() }).catch(err => logger.error('Disconnect status update error', err));
-    socket.broadcast.emit('user_offline', { userId, username: socket.user.username });
+    const offlineTimer = setTimeout(() => {
+      markUserOfflineIfStale(userId, socket.user.username).catch((err) => logger.error('Disconnect presence update error', err));
+    }, 35000);
+    if (typeof offlineTimer.unref === 'function') {
+      offlineTimer.unref();
+    }
   });
 });
 
 app.use('/api/auth/webauthn', requireDatabaseConnection, authPasskeyRoutes);
 app.use('/api/auth/recovery', requireDatabaseConnection, authenticateToken, requireCsrf, requirePasskeyEnrollment, authRecoveryRoutes);
 app.use('/api/auth', requireDatabaseConnection, authRoutes);
-app.use('/api/2fa', requireDatabaseConnection, authenticateToken, requireCsrf, requirePasskeyEnrollment, twoFactorRoutes);
+app.use('/api/2fa', requireDatabaseConnection, twoFactorRoutes);
 app.use('/api/keys', requireDatabaseConnection, authenticateToken, requireCsrf, requirePasskeyEnrollment, keysRoutes);
 // Public health checks (must be before any app.use('/api', authenticateToken, ...))
 app.use('/api', healthRoutes);

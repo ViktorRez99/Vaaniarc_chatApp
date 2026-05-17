@@ -9,6 +9,7 @@ import { useAuth } from '../context/AuthContext';
 import socketService from '../services/socket';
 import api from '../services/api';
 import { idsEqual } from '../utils/identity';
+import { toast } from './ui/Toaster';
 
 const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   const navigate = useNavigate();
@@ -34,31 +35,41 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
+  const timeoutRefs = useRef(new Set());
+
+  const scheduleTimeout = (callback, delay) => {
+    const timeoutId = window.setTimeout(() => {
+      timeoutRefs.current.delete(timeoutId);
+      callback();
+    }, delay);
+    timeoutRefs.current.add(timeoutId);
+    return timeoutId;
+  };
+
+  useEffect(() => () => {
+    timeoutRefs.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    timeoutRefs.current.clear();
+  }, []);
 
   // Expose methods to parent via ref
   useImperativeHandle(ref, () => ({
     startInstantMeeting
   }));
 
-  // This fetch should follow auth state, not callback identity churn from the context tree.
   useEffect(() => {
     if (user) {
-      fetchMeetings();
+      void fetchMeetings();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
-  // Route-driven auto-join should react to route/user state only.
   useEffect(() => {
     if (meetingIdFromRoute && user && !isInMeeting) {
       joinMeeting(meetingIdFromRoute).catch((error) => {
         console.error('Error joining meeting from route:', error);
       });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meetingIdFromRoute, user, isInMeeting]);
 
-  // Meeting socket listeners are bound once for the active meeting session.
   useEffect(() => {
     if (isInMeeting && activeMeeting) {
       setupSocketListeners();
@@ -69,7 +80,6 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
       cleanupMedia();
       cleanupSocketListeners();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isInMeeting, activeMeeting]);
 
   const fetchMeetings = async () => {
@@ -103,7 +113,11 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
       await joinMeeting(meeting.meetingId);
     } catch (error) {
       console.error('Error creating meeting:', error);
-      alert('Failed to create meeting. Please try again.');
+      toast({
+        title: 'Meeting not created',
+        description: 'Failed to create meeting. Please try again.',
+        variant: 'error'
+      });
     } finally {
       setIsCreatingMeeting(false);
     }
@@ -115,7 +129,11 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
 
   const joinMeetingByLink = async () => {
     if (!joinMeetingId.trim()) {
-      alert('Please enter a meeting ID');
+      toast({
+        title: 'Meeting ID required',
+        description: 'Please enter a meeting ID.',
+        variant: 'error'
+      });
       return;
     }
 
@@ -129,7 +147,11 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
       setJoinMeetingId('');
     } catch (error) {
       console.error('Error joining meeting:', error);
-      alert('Failed to join meeting. Please check the meeting ID and try again.');
+      toast({
+        title: 'Meeting not joined',
+        description: 'Failed to join meeting. Please check the meeting ID and try again.',
+        variant: 'error'
+      });
     }
   };
 
@@ -198,7 +220,11 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
       // This is a simplified version - full WebRTC implementation would be more complex
     } catch (error) {
       console.error('Error accessing media devices:', error);
-      alert('Could not access camera/microphone. Please check permissions.');
+      toast({
+        title: 'Media access blocked',
+        description: 'Could not access camera/microphone. Please check permissions.',
+        variant: 'error'
+      });
     }
   };
 
@@ -218,6 +244,10 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   const toggleAudio = () => {
+    if (!activeMeeting?.meetingId) {
+      return;
+    }
+
     if (localStreamRef.current) {
       const audioTrack = localStreamRef.current.getAudioTracks()[0];
       if (audioTrack) {
@@ -233,6 +263,10 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   const toggleVideo = () => {
+    if (!activeMeeting?.meetingId) {
+      return;
+    }
+
     if (localStreamRef.current) {
       const videoTrack = localStreamRef.current.getVideoTracks()[0];
       if (videoTrack) {
@@ -248,6 +282,10 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   const toggleScreenShare = async () => {
+    if (!activeMeeting?.meetingId) {
+      return;
+    }
+
     try {
       if (isScreenSharing) {
         // Stop screen sharing
@@ -296,10 +334,14 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   const copyMeetingLink = () => {
+    if (!activeMeeting?.meetingId) {
+      return;
+    }
+
     const link = `${window.location.origin}/meeting/${activeMeeting.meetingId}`;
     navigator.clipboard.writeText(link);
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    scheduleTimeout(() => setCopied(false), 2000);
   };
 
   const setupSocketListeners = () => {
@@ -317,21 +359,29 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   const handleUserJoined = (data) => {
-    console.log('User joined:', data);
+    if (import.meta.env.DEV) {
+      console.log('User joined meeting');
+    }
     // In a full implementation, this would trigger WebRTC peer connection setup
   };
 
   const handleUserLeft = (data) => {
-    console.log('User left:', data);
+    if (import.meta.env.DEV) {
+      console.log('User left meeting');
+    }
     // Clean up peer connection
   };
 
   const handleRemoteAudioToggle = (data) => {
-    console.log('Remote audio toggled:', data);
+    if (import.meta.env.DEV) {
+      console.log('Remote audio toggled');
+    }
   };
 
   const handleRemoteVideoToggle = (data) => {
-    console.log('Remote video toggled:', data);
+    if (import.meta.env.DEV) {
+      console.log('Remote video toggled');
+    }
   };
 
   const formatDateTime = (date) => {

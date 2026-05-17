@@ -65,7 +65,8 @@ const getPushStatus = async () => {
   try {
     const config = await api.getNotificationConfig();
     serverConfigured = Boolean(config?.supported && config?.vapidPublicKey);
-  } catch {
+  } catch (error) {
+    console.error('Failed to load push notification server config:', error);
     serverConfigured = false;
   }
 

@@ -1,9 +1,25 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const User = require('../models/User');
+const TwoFactor = require('../models/TwoFactor');
 const authenticateToken = require('../middleware/auth');
 const cacheService = require('../services/cacheService');
 const Session = require('../models/Session');
-const { authLimiter } = require('../middleware/rateLimiter');
+const Chat = require('../models/Chat');
+const PrivateMessage = require('../models/PrivateMessage');
+const Room = require('../models/Room');
+const Message = require('../models/Message');
+const Device = require('../models/Device');
+const PasskeyCredential = require('../models/PasskeyCredential');
+const BlockedUser = require('../models/BlockedUser');
+const UserReport = require('../models/UserReport');
+const logger = require('../utils/logger');
+const {
+  authLimiter,
+  checkAccountLockout,
+  clearFailedAttempts,
+  recordFailedAttempt
+} = require('../middleware/rateLimiter');
 const {
   logLogin,
   logLogout,
@@ -12,13 +28,28 @@ const {
 const {
   isValidEmail,
   validatePassword,
-  validateUsername
+  validateUsername,
+  buildSafeSearchRegex
 } = require('../utils/validation');
 const { parsePaginationLimit } = require('../utils/pagination');
 const {
   attachPasskeyEnrollmentStatus,
   requirePasskeyEnrollment
 } = require('../utils/passkeyEnrollment');
+const { createTwoFactorLoginChallenge } = require('../utils/twoFactorSecurity');
+const {
+  attachEmailVerificationChallenge,
+  createEmailVerificationChallenge,
+  getDevelopmentVerificationHint,
+  hashEmailVerificationToken
+} = require('../utils/emailVerification');
+const {
+  attachPasswordResetChallenge,
+  createPasswordResetChallenge,
+  getDevelopmentPasswordResetHint,
+  hashPasswordResetToken
+} = require('../utils/passwordReset');
+const { getBlockedUserIdsFor } = require('../utils/userBlocks');
 
 const router = express.Router();
 const requireCsrf = authenticateToken.requireCsrf;
@@ -27,6 +58,7 @@ const setSessionCookies = authenticateToken.setSessionCookies;
 const clearSessionCookies = authenticateToken.clearSessionCookies;
 const revokeSession = authenticateToken.revokeSession;
 const normalizeIdentifier = (value) => typeof value === 'string' ? value.trim() : '';
+const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(String(value || ''));
 const normalizeOptionalEmail = (value) => {
   const normalizedValue = normalizeIdentifier(value).toLowerCase();
   return normalizedValue || null;
@@ -35,6 +67,7 @@ const serializeAuthUser = async (user) => attachPasskeyEnrollmentStatus({
   id: user._id,
   username: user.username,
   email: user.email || null,
+  emailVerified: Boolean(user.emailVerified),
   bio: user.bio,
   firstName: user.firstName,
   lastName: user.lastName,
@@ -45,6 +78,59 @@ const serializeAuthUser = async (user) => attachPasskeyEnrollmentStatus({
   lastSeen: user.lastSeen,
   joinedAt: user.joinedAt
 }, user._id);
+
+const createEmailVerificationResponse = (req, user, challenge) => {
+  const verificationUrl = getDevelopmentVerificationHint(req, challenge.token);
+  return {
+    emailVerificationRequired: true,
+    emailVerificationExpiresAt: challenge.expiresAt,
+    ...(verificationUrl ? { verificationUrl } : {})
+  };
+};
+
+const createPasswordResetResponse = (req, challenge) => {
+  const resetUrl = getDevelopmentPasswordResetHint(req, challenge.token);
+  return {
+    passwordResetExpiresAt: challenge.expiresAt,
+    ...(resetUrl ? { resetUrl } : {})
+  };
+};
+
+const rotateSessionForProfileChange = async (req, res, user) => {
+  if (req.session) {
+    req.session.revokedAt = new Date();
+    await req.session.save();
+    await cacheService.session.delete(req.session.tokenHash);
+  }
+
+  const { session, sessionToken, csrfToken } = await createSession({
+    userId: user._id,
+    req,
+    deviceId: req.deviceId || authenticateToken.getRequestDeviceId(req)
+  });
+
+  setSessionCookies(res, {
+    sessionToken,
+    csrfToken,
+    expiresAt: session.expiresAt
+  });
+
+  return {
+    deviceId: session.deviceId,
+    expiresAt: session.expiresAt
+  };
+};
+
+const serializeSession = (session, currentSessionId = null) => ({
+  id: session._id,
+  deviceId: session.deviceId || null,
+  userAgent: session.userAgent || '',
+  ipAddress: session.ipAddress || null,
+  lastSeenAt: session.lastSeenAt,
+  expiresAt: session.expiresAt,
+  createdAt: session.createdAt,
+  isCurrent: currentSessionId ? session._id.toString() === currentSessionId.toString() : false
+});
 
 // Register new user
 router.post('/register', authLimiter, async (req, res) => {
@@ -97,6 +183,8 @@ router.post('/register', authLimiter, async (req, res) => {
       }
     }
 
+    const emailVerificationChallenge = createEmailVerificationChallenge();
+
     // Create new user
     const user = new User({
       username: normalizedUsername,
@@ -109,6 +197,7 @@ router.post('/register', authLimiter, async (req, res) => {
       location: location || '',
       avatar: avatar || null
     });
+    attachEmailVerificationChallenge(user, emailVerificationChallenge);
 
     await user.save();
 
@@ -128,13 +217,14 @@ router.post('/register', authLimiter, async (req, res) => {
     res.status(201).json({
       message: 'User registered successfully',
       user: await serializeAuthUser(user),
+      emailVerification: createEmailVerificationResponse(req, user, emailVerificationChallenge),
       session: {
         deviceId: session.deviceId,
         expiresAt: session.expiresAt
       }
     });
   } catch (error) {
-    console.error('Registration error:', error);
+    logger.error('Registration error', error);
     
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern)[0];
@@ -152,6 +242,150 @@ router.post('/register', authLimiter, async (req, res) => {
   }
 });
 
+router.get('/email-verification/verify', authLimiter, async (req, res) => {
+  try {
+    const token = normalizeIdentifier(req.query?.token);
+    if (!token) {
+      return res.status(400).json({ message: 'Verification token is required.' });
+    }
+
+    const user = await User.findOne({
+      emailVerificationTokenHash: hashEmailVerificationToken(token),
+      emailVerificationExpiresAt: { $gt: new Date() },
+      isActive: true
+    }).select('+emailVerificationTokenHash +emailVerificationExpiresAt');
+
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired verification token.' });
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationTokenHash = null;
+    user.emailVerificationExpiresAt = null;
+    await user.save({ validateBeforeSave: false });
+    await cacheService.memory.delete(`user-profile:${user._id.toString()}`);
+
+    res.json({
+      message: 'Email verified successfully.',
+      user: await serializeAuthUser(user)
+    });
+  } catch (error) {
+    logger.error('Email verification error', error);
+    res.status(500).json({ message: 'Server error verifying email.' });
+  }
+});
+
+router.post('/email-verification/resend', authenticateToken, requireCsrf, authLimiter, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id)
+      .select('+emailVerificationTokenHash +emailVerificationExpiresAt');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (!user.email) {
+      return res.status(400).json({ message: 'Add an email address before verifying it.' });
+    }
+
+    if (user.emailVerified) {
+      return res.json({ message: 'Email is already verified.', user: await serializeAuthUser(user) });
+    }
+
+    const challenge = createEmailVerificationChallenge();
+    attachEmailVerificationChallenge(user, challenge);
+    await user.save({ validateBeforeSave: false });
+    await cacheService.memory.delete(`user-profile:${user._id.toString()}`);
+
+    res.json({
+      message: 'Verification email prepared.',
+      emailVerification: createEmailVerificationResponse(req, user, challenge),
+      user: await serializeAuthUser(user)
+    });
+  } catch (error) {
+    logger.error('Email verification resend error', error);
+    res.status(500).json({ message: 'Server error preparing email verification.' });
+  }
+});
+
+router.post('/password/forgot', authLimiter, async (req, res) => {
+  try {
+    const identifier = normalizeIdentifier(req.body?.identifier || req.body?.email || req.body?.username || '');
+    if (!identifier) {
+      return res.status(400).json({ message: 'Email or username is required.' });
+    }
+
+    const normalizedEmail = normalizeOptionalEmail(identifier);
+    const user = await User.findOne({
+      $or: [
+        { username: identifier },
+        { email: normalizedEmail || identifier.toLowerCase() }
+      ],
+      isActive: true
+    }).select('+passwordResetTokenHash +passwordResetExpiresAt');
+
+    if (!user) {
+      return res.json({ message: 'If that account exists, a reset link has been prepared.' });
+    }
+
+    const challenge = createPasswordResetChallenge();
+    attachPasswordResetChallenge(user, challenge);
+    await user.save({ validateBeforeSave: false });
+
+    res.json({
+      message: 'If that account exists, a reset link has been prepared.',
+      passwordReset: createPasswordResetResponse(req, challenge)
+    });
+  } catch (error) {
+    logger.error('Password reset request error', error);
+    res.status(500).json({ message: 'Server error preparing password reset.' });
+  }
+});
+
+router.post('/password/reset', authLimiter, async (req, res) => {
+  try {
+    const token = normalizeIdentifier(req.body?.token);
+    const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ message: 'Reset token and new password are required.' });
+    }
+
+    const passwordValidation = validatePassword(newPassword);
+    if (!passwordValidation.isValid) {
+      return res.status(400).json({ message: passwordValidation.error });
+    }
+
+    const user = await User.findOne({
+      passwordResetTokenHash: hashPasswordResetToken(token),
+      passwordResetExpiresAt: { $gt: new Date() },
+      isActive: true
+    }).select('+passwordResetTokenHash +passwordResetExpiresAt');
+
+    if (!user) {
+      return res.status(400).json({ message: 'Invalid or expired password reset token.' });
+    }
+
+    user.password = newPassword;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
+    user.passwordResetTokenHash = null;
+    user.passwordResetExpiresAt = null;
+    await user.save();
+
+    const sessionsToRevoke = await Session.find({ user: user._id, revokedAt: null }).select('tokenHash');
+    await Session.updateMany(
+      { user: user._id, revokedAt: null },
+      { $set: { revokedAt: new Date() } }
+    );
+    await Promise.all(sessionsToRevoke.map((session) => cacheService.session.delete(session.tokenHash)));
+
+    res.json({ message: 'Password reset successfully. Sign in with the new password.' });
+  } catch (error) {
+    logger.error('Password reset error', error);
+    res.status(500).json({ message: 'Server error resetting password.' });
+  }
+});
+
 // Login user
 router.post('/login', authLimiter, async (req, res) => {
   try {
@@ -166,6 +400,14 @@ router.post('/login', authLimiter, async (req, res) => {
       });
     }
 
+    const lockout = await checkAccountLockout(identifier);
+    if (lockout?.locked) {
+      return res.status(429).json({
+        message: 'Account temporarily locked. Try again later.',
+        retryAfter: lockout.retryAfterSeconds
+      });
+    }
+
     // Find user by email or username
     const user = await User.findOne({
       $or: [
@@ -176,6 +418,7 @@ router.post('/login', authLimiter, async (req, res) => {
     });
 
     if (!user) {
+      await recordFailedAttempt(identifier);
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
@@ -183,7 +426,19 @@ router.post('/login', authLimiter, async (req, res) => {
     const isValidPassword = await user.comparePassword(password);
     
     if (!isValidPassword) {
+      await recordFailedAttempt(identifier);
       return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    await clearFailedAttempts(identifier);
+
+    const twoFactor = await TwoFactor.findOne({ user: user._id, enabled: true }).select('_id');
+    if (twoFactor) {
+      return res.json({
+        requires2FA: true,
+        partialToken: createTwoFactorLoginChallenge(user._id, { method: 'password' }),
+        message: 'Enter your authenticator code to continue.'
+      });
     }
 
     // Update last seen and status
@@ -213,7 +468,7 @@ router.post('/login', authLimiter, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Login error:', error);
+    logger.error('Login error', error);
     res.status(500).json({ message: 'Server error during login' });
   }
 });
@@ -234,7 +489,7 @@ router.post('/logout', authenticateToken, requireCsrf, async (req, res) => {
 
     res.json({ message: 'Logout successful' });
   } catch (error) {
-    console.error('Logout error:', error);
+    logger.error('Logout error', error);
     res.status(500).json({ message: 'Server error during logout' });
   }
 });
@@ -253,7 +508,7 @@ router.get('/profile', authenticateToken, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Profile fetch error:', error);
+    logger.error('Profile fetch error', error);
     res.status(500).json({ message: 'Server error fetching profile' });
   }
 });
@@ -263,6 +518,8 @@ router.patch('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollmen
   try {
     const { username, email, bio, firstName, lastName, phone, location, avatar } = req.body;
     const user = await User.findById(req.user._id);
+    let identityChanged = false;
+    let emailVerificationChallenge = null;
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -289,6 +546,7 @@ router.patch('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollmen
       }
       
       user.username = normalizedUsername;
+      identityChanged = true;
     }
 
     // Update or clear email if provided
@@ -315,6 +573,9 @@ router.patch('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollmen
         }
 
         user.email = normalizedEmail;
+        emailVerificationChallenge = createEmailVerificationChallenge();
+        attachEmailVerificationChallenge(user, emailVerificationChallenge);
+        identityChanged = true;
       }
     }
 
@@ -336,13 +597,20 @@ router.patch('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollmen
 
     await user.save();
     await cacheService.memory.delete(`user-profile:${user._id.toString()}`);
+    const rotatedSession = identityChanged
+      ? await rotateSessionForProfileChange(req, res, user)
+      : null;
 
     res.json({
       message: 'Profile updated successfully',
-      user: await serializeAuthUser(user)
+      user: await serializeAuthUser(user),
+      ...(rotatedSession ? { session: rotatedSession } : {}),
+      ...(emailVerificationChallenge
+        ? { emailVerification: createEmailVerificationResponse(req, user, emailVerificationChallenge) }
+        : {})
     });
   } catch (error) {
-    console.error('Profile update error:', error);
+    logger.error('Profile update error', error);
     
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern)[0];
@@ -386,7 +654,7 @@ router.patch('/status', authenticateToken, requireCsrf, requirePasskeyEnrollment
       status: user.status
     });
   } catch (error) {
-    console.error('Status update error:', error);
+    logger.error('Status update error', error);
     res.status(500).json({ message: 'Server error updating status' });
   }
 });
@@ -396,6 +664,7 @@ router.put('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollment,
   try {
     const { username, bio, status, avatar } = req.body;
     const user = await User.findById(req.user._id);
+    let identityChanged = false;
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -420,6 +689,7 @@ router.put('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollment,
       }
       
       user.username = username.trim();
+      identityChanged = true;
     }
 
     if (bio !== undefined) {
@@ -441,13 +711,17 @@ router.put('/profile', authenticateToken, requireCsrf, requirePasskeyEnrollment,
 
     await user.save();
     await cacheService.memory.delete(`user-profile:${user._id.toString()}`);
+    const rotatedSession = identityChanged
+      ? await rotateSessionForProfileChange(req, res, user)
+      : null;
 
     res.json({
       message: 'Profile updated successfully',
-      user: await serializeAuthUser(user)
+      user: await serializeAuthUser(user),
+      ...(rotatedSession ? { session: rotatedSession } : {})
     });
   } catch (error) {
-    console.error('Profile update error:', error);
+    logger.error('Profile update error', error);
     
     if (error.code === 11000) {
       return res.status(409).json({ message: 'Username already taken' });
@@ -493,6 +767,7 @@ router.put('/change-password', authenticateToken, requireCsrf, requirePasskeyEnr
 
     // Update password
     user.password = newPassword;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;
     await user.save();
 
     const sessionsToRevoke = await Session.find(
@@ -524,8 +799,230 @@ router.put('/change-password', authenticateToken, requireCsrf, requirePasskeyEnr
 
     res.json({ message: 'Password changed successfully' });
   } catch (error) {
-    console.error('Password change error:', error);
+    logger.error('Password change error', error);
     res.status(500).json({ message: 'Server error changing password' });
+  }
+});
+
+router.get('/sessions', authenticateToken, requirePasskeyEnrollment, async (req, res) => {
+  try {
+    const sessions = await Session.find({
+      user: req.user._id,
+      revokedAt: null,
+      expiresAt: { $gt: new Date() }
+    }).sort({ lastSeenAt: -1, createdAt: -1 });
+
+    res.json({
+      sessions: sessions.map((session) => serializeSession(session, req.session?._id))
+    });
+  } catch (error) {
+    logger.error('Session list error', error);
+    res.status(500).json({ message: 'Server error fetching sessions.' });
+  }
+});
+
+router.delete('/sessions/:sessionId', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
+  try {
+    const session = await Session.findOne({
+      _id: req.params.sessionId,
+      user: req.user._id,
+      revokedAt: null
+    });
+
+    if (!session) {
+      return res.status(404).json({ message: 'Session not found.' });
+    }
+
+    await revokeSession(session);
+
+    if (req.session?._id?.toString() === session._id.toString()) {
+      clearSessionCookies(res);
+    }
+
+    res.json({ message: 'Session revoked.' });
+  } catch (error) {
+    logger.error('Session revoke error', error);
+    res.status(500).json({ message: 'Server error revoking session.' });
+  }
+});
+
+router.get('/export', authenticateToken, requirePasskeyEnrollment, async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const [directChatIds, roomIds] = await Promise.all([
+      Chat.find({ participants: userId }).distinct('_id'),
+      Room.find({ 'members.user': userId }).distinct('_id')
+    ]);
+
+    const [profile, devices, passkeys, sessions, directChats, directMessages, rooms, roomMessages, blockedUsers, submittedReports] = await Promise.all([
+      User.findById(userId).select('-password').lean(),
+      Device.find({ user: userId }).lean(),
+      PasskeyCredential.find({ user: userId }).select('-publicKey -credentialID').lean(),
+      Session.find({ user: userId }).select('-tokenHash -csrfTokenHash').lean(),
+      Chat.find({ participants: userId }).populate('participants', 'username email avatar').lean(),
+      PrivateMessage.find({
+        $or: [
+          { sender: userId },
+          { chatId: { $in: directChatIds } }
+        ]
+      }).lean(),
+      Room.find({ 'members.user': userId }).lean(),
+      Message.find({
+        room: { $in: roomIds }
+      }).lean(),
+      BlockedUser.find({ blocker: userId }).populate('blocked', 'username avatar').lean(),
+      UserReport.find({ reporter: userId }).select('-reported').lean()
+    ]);
+
+    res.json({
+      exportedAt: new Date().toISOString(),
+      profile,
+      devices,
+      passkeys,
+      sessions,
+      directChats,
+      directMessages,
+      rooms,
+      roomMessages,
+      blockedUsers,
+      submittedReports
+    });
+  } catch (error) {
+    logger.error('Account export error', error);
+    res.status(500).json({ message: 'Server error exporting account data.' });
+  }
+});
+
+router.delete('/account', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
+  try {
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!password) {
+      return res.status(400).json({ message: 'Password is required to delete your account.' });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    const passwordValid = await user.comparePassword(password);
+    if (!passwordValid) {
+      return res.status(401).json({ message: 'Password is incorrect.' });
+    }
+
+    await user.deleteOne();
+    clearSessionCookies(res);
+
+    res.json({ message: 'Account deleted successfully.' });
+  } catch (error) {
+    logger.error('Account deletion error', error);
+    res.status(500).json({ message: 'Server error deleting account.' });
+  }
+});
+
+router.get('/blocks', authenticateToken, requirePasskeyEnrollment, async (req, res) => {
+  try {
+    const blocks = await BlockedUser.find({ blocker: req.user._id })
+      .populate('blocked', 'username avatar status lastSeen')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json({
+      blocks: blocks.map((block) => ({
+        id: block._id,
+        blockedUser: block.blocked,
+        reason: block.reason || '',
+        createdAt: block.createdAt
+      }))
+    });
+  } catch (error) {
+    logger.error('Block list error', error);
+    res.status(500).json({ message: 'Server error fetching blocked users.' });
+  }
+});
+
+router.post('/users/:userId/block', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
+  try {
+    const blockedUserId = normalizeIdentifier(req.params.userId);
+    if (!isValidObjectId(blockedUserId) || blockedUserId === req.user._id.toString()) {
+      return res.status(400).json({ message: 'Cannot block this user.' });
+    }
+
+    const targetUser = await User.findById(blockedUserId).select('_id username avatar');
+    if (!targetUser || !targetUser.isActive) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    const block = await BlockedUser.findOneAndUpdate(
+      { blocker: req.user._id, blocked: targetUser._id },
+      { reason: String(req.body?.reason || '').trim().slice(0, 500) },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    res.json({
+      message: 'User blocked.',
+      block: {
+        id: block._id,
+        blockedUser: targetUser,
+        reason: block.reason || '',
+        createdAt: block.createdAt
+      }
+    });
+  } catch (error) {
+    logger.error('User block error', error);
+    res.status(500).json({ message: 'Server error blocking user.' });
+  }
+});
+
+router.delete('/users/:userId/block', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
+  try {
+    const blockedUserId = normalizeIdentifier(req.params.userId);
+    if (!isValidObjectId(blockedUserId) || blockedUserId === req.user._id.toString()) {
+      return res.status(400).json({ message: 'Cannot unblock this user.' });
+    }
+
+    await BlockedUser.deleteOne({
+      blocker: req.user._id,
+      blocked: blockedUserId
+    });
+
+    res.json({ message: 'User unblocked.' });
+  } catch (error) {
+    logger.error('User unblock error', error);
+    res.status(500).json({ message: 'Server error unblocking user.' });
+  }
+});
+
+router.post('/users/:userId/report', authenticateToken, requireCsrf, requirePasskeyEnrollment, async (req, res) => {
+  try {
+    const reportedUserId = normalizeIdentifier(req.params.userId);
+    if (!isValidObjectId(reportedUserId) || reportedUserId === req.user._id.toString()) {
+      return res.status(400).json({ message: 'Cannot report this user.' });
+    }
+
+    const targetUser = await User.findById(reportedUserId).select('_id');
+    if (!targetUser || !targetUser.isActive) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    const report = await UserReport.create({
+      reporter: req.user._id,
+      reported: targetUser._id,
+      reason: String(req.body?.reason || 'abuse').trim().slice(0, 80) || 'abuse',
+      details: String(req.body?.details || '').trim().slice(0, 1000)
+    });
+
+    res.status(201).json({
+      message: 'Report submitted for review.',
+      report: {
+        id: report._id,
+        status: report.status,
+        createdAt: report.createdAt
+      }
+    });
+  } catch (error) {
+    logger.error('User report error', error);
+    res.status(500).json({ message: 'Server error submitting report.' });
   }
 });
 
@@ -552,10 +1049,15 @@ router.get('/users/search', authenticateToken, requirePasskeyEnrollment, async (
       });
     }
 
-    const searchRegex = new RegExp(q.trim(), 'i');
+    const searchRegex = buildSafeSearchRegex(q);
+    if (!searchRegex) {
+      return res.status(400).json({ message: 'Search query must be valid text' });
+    }
+    const blockedUserIds = await getBlockedUserIdsFor(req.user._id);
     const users = await User.find({
       $and: [
         { _id: { $ne: req.user._id } }, // Exclude current user
+        ...(blockedUserIds.length ? [{ _id: { $nin: blockedUserIds } }] : []),
         { isActive: true },
         { username: searchRegex }
       ]
@@ -566,7 +1068,7 @@ router.get('/users/search', authenticateToken, requirePasskeyEnrollment, async (
 
     res.json({ users });
   } catch (error) {
-    console.error('User search error:', error);
+    logger.error('User search error', error);
     res.status(500).json({ message: 'Server error searching users' });
   }
 });

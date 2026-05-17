@@ -27,6 +27,11 @@ const chatSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'PrivateMessage'
   },
+  archivedFor: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: []
+  }],
   updatedAt: {
     type: Date,
     default: Date.now
@@ -37,6 +42,7 @@ const chatSchema = new mongoose.Schema({
 
 // Index for efficient queries
 chatSchema.index({ participants: 1, updatedAt: -1 });
+chatSchema.index({ archivedFor: 1 });
 chatSchema.index({ type: 1, updatedAt: -1 });
 chatSchema.index({ participantHash: 1 }, { unique: true, sparse: true });
 

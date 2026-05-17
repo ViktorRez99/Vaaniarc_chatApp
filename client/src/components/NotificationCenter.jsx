@@ -2,7 +2,7 @@ import { useState } from "react"
 import { useSocket } from "../context/SocketContext"
 
 const NotificationCenter = () => {
-  const { notifications, unreadCounts } = useSocket()
+  const { notifications, unreadCounts, clearNotifications, markNotificationsRead } = useSocket()
   const [showNotifications, setShowNotifications] = useState(false)
 
   const totalUnread = Array.from(unreadCounts.values()).reduce((sum, count) => sum + count, 0)
@@ -24,6 +24,7 @@ const NotificationCenter = () => {
   }
 
   const clearAllNotifications = () => {
+    clearNotifications()
     setShowNotifications(false)
   }
 
@@ -158,7 +159,10 @@ const NotificationCenter = () => {
                   <small className="text-gray-400 font-medium">
                     {notifications.length} notification{notifications.length !== 1 ? "s" : ""}
                   </small>
-                  <button className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold transition-colors">
+                  <button
+                    className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold transition-colors"
+                    onClick={markNotificationsRead}
+                  >
                     Mark all as read
                   </button>
                 </div>

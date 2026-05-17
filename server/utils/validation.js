@@ -25,6 +25,16 @@ const COMMON_PASSWORDS = new Set([
 ]);
 const COMMON_PASSWORD_PATTERNS = ['password', 'qwerty', '123456', 'letmein', 'changeme', 'welcome'];
 
+const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const buildSafeSearchRegex = (input, maxLength = 50) => {
+  if (typeof input !== 'string' || !input.trim()) {
+    return null;
+  }
+
+  return new RegExp(escapeRegex(input.trim().slice(0, maxLength)), 'i');
+};
+
 /**
  * Validate email format
  * @param {string} email - Email address to validate
@@ -321,6 +331,7 @@ const validateStatus = (status) => {
 
 module.exports = {
   PASSWORD_POLICY,
+  buildSafeSearchRegex,
   isValidEmail,
   validateUsername,
   validatePassword,

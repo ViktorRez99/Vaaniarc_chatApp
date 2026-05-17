@@ -7,7 +7,7 @@ const { buildUniqueSlug } = require('../utils/slug');
 const logger = require('../utils/logger');
 const { arrayIncludesId, normalizeId } = require('../utils/idHelpers');
 const { buildConversationId } = require('../utils/conversationHelpers');
-const { logMessageModeration } = require('../middleware/auditLog');
+const { buildSafeSearchRegex } = require('../utils/validation');
 
 const router = express.Router();
 
@@ -109,28 +109,23 @@ router.get('/channels', async (req, res) => {
     };
 
     if (search) {
+      const safeRegex = buildSafeSearchRegex(search);
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+        { name: safeRegex },
+        { description: safeRegex }
       ];
     }
 
     const channels = await Channel.find(query)
       .populate('owner', 'username avatar')
-      .populate('admins', 'username avatar')
-      .populate('community', 'name slug visibility')
-      .sort({ lastActivity: -1 });
+      .sort({ lastActivity: -1, createdAt: -1 })
+      .limit(30);
 
-    const latestPostByChannelId = await loadLatestPosts(channels.map((channel) => channel._id));
+    const channelsWithLastPost = await loadLatestPosts(channels);
 
-    res.json(channels.map((channel) => (
-      serializeChannel(channel, userId, latestPostByChannelId.get(normalizeId(channel._id)) || null)
-    )));
-  } catch (error) {
-    logger.error('Channel list error', error);
-    res.status(500).json({ message: 'Failed to fetch channels' });
-  }
-});
+    res.json({
+      channels: channelsWithLastPost.map((channel) => ({...serializeChannel(channel, userId), isJoined: true}))
+    });
 
 router.get('/channels/discover', async (req, res) => {
   try {
@@ -150,9 +145,10 @@ router.get('/channels/discover', async (req, res) => {
     };
 
     if (search) {
+      const safeRegex = buildSafeSearchRegex(search);
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+        { name: safeRegex },
+        { description: safeRegex }
       ];
     }
 

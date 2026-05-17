@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 
 const authenticateToken = require('../middleware/auth');
@@ -155,7 +156,7 @@ router.get('/kits', authenticateToken, async (req, res) => {
       kits: kits.map((kit) => serializeRecoveryKit(kit))
     });
   } catch (error) {
-    console.error('Recovery kit list error:', error);
+    logger.error('Recovery kit list error:', error);
     res.status(500).json({ message: 'Failed to load recovery kits.' });
   }
 });
@@ -196,7 +197,7 @@ router.post('/kits', authenticateToken, requireCsrf, async (req, res) => {
       kit: serializeRecoveryKit(populatedKit)
     });
   } catch (error) {
-    console.error('Recovery kit creation error:', error);
+    logger.error('Recovery kit creation error:', error);
     res.status(500).json({ message: 'Failed to save the recovery kit.' });
   }
 });
@@ -253,7 +254,7 @@ router.post('/kits/:kitId/rotate', authenticateToken, requireCsrf, async (req, r
       previousKitId: currentKit._id
     });
   } catch (error) {
-    console.error('Recovery kit rotation error:', error);
+    logger.error('Recovery kit rotation error:', error);
     res.status(500).json({ message: 'Failed to rotate the recovery kit.' });
   }
 });
@@ -279,7 +280,7 @@ router.delete('/kits/:kitId', authenticateToken, requireCsrf, async (req, res) =
       kit: serializeRecoveryKit(recoveryKit)
     });
   } catch (error) {
-    console.error('Recovery kit revoke error:', error);
+    logger.error('Recovery kit revoke error:', error);
     res.status(500).json({ message: 'Failed to revoke the recovery kit.' });
   }
 });
@@ -317,7 +318,7 @@ router.get('/received', authenticateToken, async (req, res) => {
       receivedShares
     });
   } catch (error) {
-    console.error('Received recovery share list error:', error);
+    logger.error('Received recovery share list error:', error);
     res.status(500).json({ message: 'Failed to load encrypted recovery shares.' });
   }
 });

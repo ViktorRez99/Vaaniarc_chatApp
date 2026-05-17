@@ -191,7 +191,10 @@ const LandingPage = () => {
 
   const handleDemo = useCallback(async () => {
     try { await login({ identifier: "demo", password: "demopassword" }); navigate('/chat') }
-    catch { navigate('/auth') }
+    catch (navigationError) {
+      console.error('Failed to open demo route:', navigationError)
+      navigate('/auth')
+    }
   }, [login, navigate])
 
   const { scrollYProgress } = useScroll()

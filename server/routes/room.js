@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 const router = express.Router();
 const Room = require('../models/Room');
@@ -5,7 +6,7 @@ const Message = require('../models/Message');
 const User = require('../models/User');
 const cacheService = require('../services/cacheService');
 const { enqueueBackgroundJob } = require('../services/backgroundJobs');
-const { arrayIncludesId } = require('../utils/idHelpers');
+const { buildSafeSearchRegex } = require('../utils/validation');
 const { parsePaginationLimit } = require('../utils/pagination');
 const { validateDeviceBoundPayload } = require('../utils/e2eePayloads');
 const { emitToDeviceRooms, resolveAuthorizedDeviceIds } = require('../utils/deviceDelivery');
@@ -29,6 +30,10 @@ const {
 const {
   resolveStoredTextContent
 } = require('../utils/secureMessaging');
+const {
+  logMessageDelete,
+  logMessageEdit
+} = require('../middleware/auditLog');
 
 const invalidateRoomCache = (roomId) => {
   const cachePrefix = `room-details:${roomId}:`;
@@ -60,7 +65,7 @@ router.get('/rooms', async (req, res) => {
     
     res.json(rooms);
   } catch (error) {
-    console.error('Error fetching rooms:', error);
+    logger.error('Error fetching rooms:', error);
     res.status(500).json({ message: 'Failed to fetch rooms' });
   }
 });
@@ -77,9 +82,10 @@ router.get('/rooms/public', async (req, res) => {
     };
 
     if (search) {
+      const safeRegex = buildSafeSearchRegex(search);
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+        { name: safeRegex },
+        { description: safeRegex }
       ];
     }
     
@@ -91,7 +97,7 @@ router.get('/rooms/public', async (req, res) => {
     
     res.json(rooms);
   } catch (error) {
-    console.error('Error fetching public rooms:', error);
+    logger.error('Error fetching public rooms:', error);
     res.status(500).json({ message: 'Failed to fetch public rooms' });
   }
 });
@@ -143,7 +149,7 @@ router.post('/rooms', async (req, res) => {
 
     res.status(201).json(room);
   } catch (error) {
-    console.error('Error creating room:', error);
+    logger.error('Error creating room:', error);
     res.status(500).json({ message: 'Failed to create room' });
   }
 });
@@ -176,7 +182,7 @@ router.get('/rooms/:roomId', async (req, res) => {
 
     res.json(room);
   } catch (error) {
-    console.error('Error fetching room details:', error);
+    logger.error('Error fetching room details:', error);
     res.status(500).json({ message: 'Failed to fetch room details' });
   }
 });
@@ -242,7 +248,7 @@ router.patch('/rooms/:roomId', async (req, res) => {
 
     res.json(room);
   } catch (error) {
-    console.error('Error updating room:', error);
+    logger.error('Error updating room:', error);
     res.status(500).json({ message: 'Failed to update room' });
   }
 });
@@ -286,7 +292,7 @@ router.post('/rooms/:roomId/join', async (req, res) => {
       room
     });
   } catch (error) {
-    console.error('Error joining room:', error);
+    logger.error('Error joining room:', error);
     res.status(500).json({ message: 'Failed to join room' });
   }
 });
@@ -330,7 +336,7 @@ router.post('/rooms/:roomId/leave', async (req, res) => {
       message: 'Successfully left the room'
     });
   } catch (error) {
-    console.error('Error leaving room:', error);
+    logger.error('Error leaving room:', error);
     res.status(500).json({ message: 'Failed to leave room' });
   }
 });
@@ -388,7 +394,7 @@ router.post('/rooms/:roomId/members', async (req, res) => {
       res.status(400).json({ message: 'Failed to add member' });
     }
   } catch (error) {
-    console.error('Error adding member:', error);
+    logger.error('Error adding member:', error);
     res.status(500).json({ message: 'Failed to add member' });
   }
 });
@@ -429,7 +435,7 @@ router.delete('/rooms/:roomId/members/:userId', async (req, res) => {
       message: 'Member removed successfully'
     });
   } catch (error) {
-    console.error('Error removing member:', error);
+    logger.error('Error removing member:', error);
     res.status(500).json({ message: 'Failed to remove member' });
   }
 });
@@ -488,7 +494,7 @@ router.patch('/rooms/:roomId/members/:userId/role', async (req, res) => {
       room
     });
   } catch (error) {
-    console.error('Error updating member role:', error);
+    logger.error('Error updating member role:', error);
     res.status(500).json({ message: 'Failed to update member role' });
   }
 });
@@ -532,7 +538,7 @@ router.get('/rooms/:roomId/messages', async (req, res) => {
 
     res.json(serializeRoomMessagesForUser(messages.reverse(), userId));
   } catch (error) {
-    console.error('Error fetching room messages:', error);
+    logger.error('Error fetching room messages:', error);
     res.status(500).json({ message: 'Failed to fetch room messages' });
   }
 });
@@ -567,7 +573,7 @@ router.get('/rooms/:roomId/messages/pinned', async (req, res) => {
       messages: serializeRoomMessagesForUser(messages, userId)
     });
   } catch (error) {
-    console.error('Error fetching pinned room messages:', error);
+    logger.error('Error fetching pinned room messages:', error);
     res.status(500).json({ message: 'Failed to fetch pinned messages' });
   }
 });
@@ -586,6 +592,10 @@ router.post('/rooms/:roomId/messages', async (req, res) => {
       forwardedFrom
     } = req.body;
     const userId = req.user._id;
+    if (messageType === 'text' && !encryptedContent) {
+      return res.status(400).json({ message: 'Encrypted content is required for room messages.' });
+    }
+
     const storedText = resolveStoredTextContent({
       plaintext: text,
       encryptedContent
@@ -719,7 +729,7 @@ router.post('/rooms/:roomId/messages', async (req, res) => {
 
     res.status(201).json(message);
   } catch (error) {
-    console.error('Error sending room message:', error);
+    logger.error('Error sending room message:', error);
     if (String(error.message || '').toLowerCase().includes('plaintext content')) {
       return res.status(400).json({ message: error.message });
     }
@@ -764,7 +774,7 @@ router.post('/rooms/:roomId/messages/:messageId/consume-view-once', async (req, 
       message: serializeRoomMessageForUser(message, userId)
     });
   } catch (error) {
-    console.error('Error consuming room view-once message:', error);
+    logger.error('Error consuming room view-once message:', error);
     res.status(500).json({ message: 'Failed to consume the view-once attachment' });
   }
 });
@@ -813,8 +823,181 @@ router.patch('/rooms/:roomId/messages/:messageId/pin', async (req, res) => {
 
     res.json(payload);
   } catch (error) {
-    console.error('Error pinning room message:', error);
+    logger.error('Error pinning room message:', error);
     res.status(500).json({ message: 'Failed to update the pinned state' });
+  }
+});
+
+router.patch('/rooms/:roomId/messages/:messageId/reactions', async (req, res) => {
+  try {
+    const { roomId, messageId } = req.params;
+    const emoji = String(req.body?.emoji || '').trim().slice(0, 16);
+    const userId = req.user._id;
+
+    if (!emoji) {
+      return res.status(400).json({ message: 'Emoji is required.' });
+    }
+
+    const room = await Room.findById(roomId);
+    if (!room || !room.isActive) {
+      return res.status(404).json({ message: 'Room not found' });
+    }
+
+    if (!room.isMember(userId)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const message = await Message.findOne({
+      _id: messageId,
+      room: roomId,
+      isDeleted: false
+    });
+
+    if (!message) {
+      return res.status(404).json({ message: 'Message not found' });
+    }
+
+    const alreadyReacted = Array.isArray(message.reactions) && message.reactions.some(
+      (reaction) => reaction.user.toString() === userId.toString() && reaction.emoji === emoji
+    );
+
+    if (alreadyReacted) {
+      message.removeReaction(userId, emoji);
+    } else {
+      message.addReaction(userId, emoji);
+    }
+
+    await message.save();
+    await populateRoomMessage(message);
+
+    const payload = {
+      roomId: room._id.toString(),
+      message: serializeRoomMessageForUser(message, userId),
+      emoji,
+      reacted: !alreadyReacted
+    };
+    const io = req.app.get('io');
+    if (io) {
+      emitSocketEvent(io.to(`room:${roomId}`), 'room_message_reaction', payload);
+    }
+
+    res.json(payload);
+  } catch (error) {
+    logger.error('Error updating room message reaction:', error);
+    res.status(500).json({ message: 'Failed to update reaction' });
+  }
+});
+
+router.put('/rooms/:roomId/messages/:messageId', async (req, res) => {
+  try {
+    const { roomId, messageId } = req.params;
+    const content = String(req.body?.text || '').trim();
+    const expectedUpdatedAt = req.body?.expectedUpdatedAt || null;
+    const userId = req.user._id;
+
+    if (!content) {
+      return res.status(400).json({ message: 'Message content is required.' });
+    }
+
+    if (content.length > 2000) {
+      return res.status(400).json({ message: 'Message must be 2000 characters or less.' });
+    }
+
+    const room = await Room.findById(roomId);
+    if (!room || !room.isActive) {
+      return res.status(404).json({ message: 'Room not found' });
+    }
+
+    if (!room.isMember(userId)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const message = await Message.findOne({
+      _id: messageId,
+      room: roomId,
+      isDeleted: false
+    });
+
+    if (!message) {
+      return res.status(404).json({ message: 'Message not found' });
+    }
+
+    if (expectedUpdatedAt && new Date(message.updatedAt).getTime() !== new Date(expectedUpdatedAt).getTime()) {
+      return res.status(409).json({ message: 'Message changed before your edit was saved.' });
+    }
+
+    if (!message.canEdit(userId)) {
+      return res.status(400).json({ message: 'This message can no longer be edited.' });
+    }
+
+    message.editContent(content);
+    await message.save();
+    await populateRoomMessage(message);
+
+    const payload = {
+      roomId: room._id.toString(),
+      message: serializeRoomMessageForUser(message, userId)
+    };
+    const io = req.app.get('io');
+    if (io) {
+      emitSocketEvent(io.to(`room:${roomId}`), 'room_message_edit', payload);
+    }
+
+    await logMessageEdit(userId, messageId, req, { roomId });
+    res.json(payload);
+  } catch (error) {
+    logger.error('Error editing room message:', error);
+    res.status(500).json({ message: 'Failed to edit message' });
+  }
+});
+
+router.delete('/rooms/:roomId/messages/:messageId', async (req, res) => {
+  try {
+    const { roomId, messageId } = req.params;
+    const userId = req.user._id;
+
+    const room = await Room.findById(roomId);
+    if (!room || !room.isActive) {
+      return res.status(404).json({ message: 'Room not found' });
+    }
+
+    if (!room.isMember(userId)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const message = await Message.findOne({
+      _id: messageId,
+      room: roomId,
+      isDeleted: false
+    });
+
+    if (!message) {
+      return res.status(404).json({ message: 'Message not found' });
+    }
+
+    const canModerate = room.isAdmin(userId) || arrayIncludesId(room.moderators, userId);
+    if (!canModerate && !message.canDelete(userId)) {
+      return res.status(400).json({ message: 'This message can no longer be deleted.' });
+    }
+
+    message.softDelete();
+    await message.save();
+    await populateRoomMessage(message);
+
+    const payload = {
+      roomId: room._id.toString(),
+      message: serializeRoomMessageForUser(message, userId)
+    };
+    const io = req.app.get('io');
+    if (io) {
+      emitSocketEvent(io.to(`room:${roomId}`), 'room_message_delete', payload);
+    }
+
+    await logMessageDelete(userId, messageId, req, { roomId, moderated: canModerate && message.sender.toString() !== userId.toString() });
+    res.json(payload);
+  } catch (error) {
+    logger.error('Error deleting room message:', error);
+    res.status(500).json({ message: 'Failed to delete message' });
   }
 });
 
@@ -844,7 +1027,7 @@ router.delete('/rooms/:roomId', async (req, res) => {
       message: 'Room deleted successfully'
     });
   } catch (error) {
-    console.error('Error deleting room:', error);
+    logger.error('Error deleting room:', error);
     res.status(500).json({ message: 'Failed to delete room' });
   }
 });
@@ -889,7 +1072,7 @@ router.get('/rooms/:roomId/stats', async (req, res) => {
       lastActivity: room.lastActivity
     });
   } catch (error) {
-    console.error('Error fetching room stats:', error);
+    logger.error('Error fetching room stats:', error);
     res.status(500).json({ message: 'Failed to fetch room stats' });
   }
 });

@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
@@ -79,7 +80,7 @@ router.post('/identity', authenticateToken, requireCsrf, async (req, res) => {
 
     res.json({ message: 'Identity key stored successfully' });
   } catch (error) {
-    console.error('Identity key storage error:', error);
+    logger.error('Identity key storage error:', error);
     res.status(500).json({ message: 'Failed to store identity key' });
   }
 });
@@ -98,7 +99,7 @@ router.post('/prekeys', authenticateToken, requireCsrf, async (req, res) => {
 
     res.json({ message: 'Pre-keys stored successfully' });
   } catch (error) {
-    console.error('Pre-keys storage error:', error);
+    logger.error('Pre-keys storage error:', error);
     res.status(500).json({ message: 'Failed to store pre-keys' });
   }
 });
@@ -124,7 +125,7 @@ router.get('/prekeys/:userId', authenticateToken, async (req, res) => {
       registrationId: user.registrationId
     });
   } catch (error) {
-    console.error('Pre-keys fetch error:', error);
+    logger.error('Pre-keys fetch error:', error);
     res.status(500).json({ message: 'Failed to fetch pre-keys' });
   }
 });
@@ -138,7 +139,7 @@ router.post('/signed', authenticateToken, requireCsrf, async (req, res) => {
 
     res.json({ message: 'Signed pre-key updated successfully' });
   } catch (error) {
-    console.error('Signed pre-key update error:', error);
+    logger.error('Signed pre-key update error:', error);
     res.status(500).json({ message: 'Failed to update signed pre-key' });
   }
 });
@@ -158,7 +159,7 @@ router.get('/identity/:userId', authenticateToken, async (req, res) => {
       username: user.username
     });
   } catch (error) {
-    console.error('Identity key fetch error:', error);
+    logger.error('Identity key fetch error:', error);
     res.status(500).json({ message: 'Failed to fetch identity key' });
   }
 });
@@ -302,7 +303,7 @@ router.post('/devices/register', authenticateToken, requireCsrf, async (req, res
       device: serializeDeviceRecord(device, materialMap)
     });
   } catch (error) {
-    console.error('Device key bundle storage error:', error);
+    logger.error('Device key bundle storage error:', error);
     res.status(500).json({ message: 'Failed to store device key bundle' });
   }
 });
@@ -328,7 +329,7 @@ router.get('/devices/:userId', authenticateToken, async (req, res) => {
       devices: devices.map((device) => serializeDeviceRecord(device, materialMap))
     });
   } catch (error) {
-    console.error('Device key bundles fetch error:', error);
+    logger.error('Device key bundles fetch error:', error);
     res.status(500).json({ message: 'Failed to fetch device key bundles' });
   }
 });
@@ -341,33 +342,47 @@ router.post('/devices/consume-prekey', authenticateToken, requireCsrf, async (re
       return res.status(400).json({ message: 'Target user ID and device ID are required.' });
     }
 
-    const device = await Device.findOne({
-      user: userId,
-      deviceId,
-      revokedAt: null,
-      'keyBundle.encryptionPublicKey': { $ne: null }
-    }).select('deviceId deviceName browser platform keyBundle keyBundleVersion publicKeyFingerprint lastActive linkedAt user');
+    const device = await Device.findOneAndUpdate(
+      {
+        user: userId,
+        deviceId,
+        revokedAt: null,
+        'keyBundle.encryptionPublicKey': { $ne: null }
+      },
+      { $pop: { 'keyBundle.oneTimePreKeys': -1 } },
+      { new: false }
+    ).select('deviceId deviceName browser platform keyBundle keyBundleVersion publicKeyFingerprint lastActive linkedAt user');
 
     if (!device) {
       return res.status(404).json({ message: 'No active device bundle found for the requested device.' });
     }
 
     const oneTimePreKey = Array.isArray(device.keyBundle?.oneTimePreKeys) && device.keyBundle.oneTimePreKeys.length
-      ? device.keyBundle.oneTimePreKeys.shift()
-      : null;
-    const materialRecord = await DeviceKeyMaterial.findOne({ user: userId, deviceId });
-    const postQuantumOneTimePreKey = Array.isArray(materialRecord?.coldPathMaterial?.auxiliaryBundles?.postQuantum?.kem?.oneTimePreKeys)
-      && materialRecord.coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys.length
-      ? materialRecord.coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys.shift()
+      ? device.keyBundle.oneTimePreKeys[0]
       : null;
 
     if (oneTimePreKey) {
-      await device.save();
+      device.keyBundle.oneTimePreKeys = device.keyBundle.oneTimePreKeys.slice(1);
     }
 
-    if (postQuantumOneTimePreKey && materialRecord) {
-      materialRecord.markModified('coldPathMaterial');
-      await materialRecord.save();
+    const materialRecord = await DeviceKeyMaterial.findOneAndUpdate(
+      {
+        user: userId,
+        deviceId,
+        'coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys.0': { $exists: true }
+      },
+      { $pop: { 'coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys': -1 } },
+      { new: false }
+    );
+
+    const postQuantumOneTimePreKey = Array.isArray(materialRecord?.coldPathMaterial?.auxiliaryBundles?.postQuantum?.kem?.oneTimePreKeys)
+      && materialRecord.coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys.length
+      ? materialRecord.coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys[0]
+      : null;
+
+    if (postQuantumOneTimePreKey) {
+      materialRecord.coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys =
+        materialRecord.coldPathMaterial.auxiliaryBundles.postQuantum.kem.oneTimePreKeys.slice(1);
     }
 
     const materialMap = await buildDeviceKeyMaterialMap([device]);
@@ -401,7 +416,7 @@ router.post('/devices/consume-prekey', authenticateToken, requireCsrf, async (re
       }
     });
   } catch (error) {
-    console.error('Device prekey consumption error:', error);
+    logger.error('Device prekey consumption error:', error);
     res.status(500).json({ message: 'Failed to fetch a device prekey bundle' });
   }
 });
@@ -413,7 +428,7 @@ router.get('/transparency/:userId', authenticateToken, async (req, res) => {
 
     res.json(transparencyLog);
   } catch (error) {
-    console.error('Key transparency fetch error:', error);
+    logger.error('Key transparency fetch error:', error);
     res.status(500).json({ message: 'Failed to fetch key transparency history' });
   }
 });

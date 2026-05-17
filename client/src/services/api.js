@@ -166,8 +166,8 @@ class ApiService {
       try {
         // Try to parse as JSON
         data = responseText ? JSON.parse(responseText) : {};
-      } catch {
-        console.error('Failed to parse response:', responseText?.substring(0, 200));
+      } catch (parseError) {
+        console.error('Failed to parse response from', endpoint, 'status:', response.status, parseError);
         if (response.status >= 200 && response.status < 300) {
           return { success: true };
         }
@@ -291,6 +291,27 @@ class ApiService {
     });
   }
 
+  async verifyTwoFactorLogin(payload) {
+    return this.apiCall('/2fa/verify-login', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async requestPasswordReset(payload) {
+    return this.apiCall('/auth/password/forgot', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async resetPassword(payload) {
+    return this.apiCall('/auth/password/reset', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   async logout() {
     return this.apiCall('/auth/logout', {
       method: 'POST',
@@ -312,6 +333,27 @@ class ApiService {
     return this.apiCall('/auth/change-password', {
       method: 'PUT',
       body: JSON.stringify(passwordData),
+    });
+  }
+
+  async getAuthSessions() {
+    return this.apiCall('/auth/sessions');
+  }
+
+  async revokeAuthSession(sessionId) {
+    return this.apiCall(`/auth/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async exportAccountData() {
+    return this.apiCall('/auth/export');
+  }
+
+  async deleteAccount(password) {
+    return this.apiCall('/auth/account', {
+      method: 'DELETE',
+      body: JSON.stringify({ password }),
     });
   }
 
@@ -574,6 +616,26 @@ class ApiService {
     });
   }
 
+  async reactToRoomMessage(roomId, messageId, emoji) {
+    return this.apiCall(`/rooms/${roomId}/messages/${messageId}/reactions`, {
+      method: 'PATCH',
+      body: JSON.stringify({ emoji }),
+    });
+  }
+
+  async editRoomMessage(roomId, messageId, text, expectedUpdatedAt = null) {
+    return this.apiCall(`/rooms/${roomId}/messages/${messageId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ text, expectedUpdatedAt }),
+    });
+  }
+
+  async deleteRoomMessage(roomId, messageId) {
+    return this.apiCall(`/rooms/${roomId}/messages/${messageId}`, {
+      method: 'DELETE',
+    });
+  }
+
   async getDevices() {
     return this.apiCall('/devices');
   }
@@ -784,7 +846,7 @@ class ApiService {
       formData.append('roomId', roomId);
     }
 
-    return this.apiCall('/upload/file', {
+    return this.apiCall('/upload/room-file', {
       method: 'POST',
       body: formData,
     });
@@ -859,7 +921,8 @@ class ApiService {
       tempId = null,
       encryptedFilePayload = null,
       expiresInSeconds = null,
-      isViewOnce = false
+      isViewOnce = false,
+      messageType = null
     } = options;
     const formData = new FormData();
     formData.append('chatId', chatId);
@@ -880,6 +943,10 @@ class ApiService {
       formData.append('isViewOnce', 'true');
     }
 
+    if (messageType) {
+      formData.append('messageType', messageType);
+    }
+
     formData.append('file', file);
 
     return this.apiCall('/upload/chat-file', {
@@ -893,7 +960,8 @@ class ApiService {
       tempId = null,
       encryptedFilePayload = null,
       expiresInSeconds = null,
-      isViewOnce = false
+      isViewOnce = false,
+      messageType = null
     } = options;
     const formData = new FormData();
     formData.append('roomId', roomId);
@@ -912,6 +980,10 @@ class ApiService {
 
     if (isViewOnce) {
       formData.append('isViewOnce', 'true');
+    }
+
+    if (messageType) {
+      formData.append('messageType', messageType);
     }
 
     formData.append('file', file);

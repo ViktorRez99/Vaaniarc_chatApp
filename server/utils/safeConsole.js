@@ -1,4 +1,4 @@
-const SENSITIVE_KEY_PATTERN = /token|secret|password|authorization|cookie|csrf|credential|session|otp|totp|key/i;
+const SENSITIVE_KEY_PATTERN = /authorization|cookie|csrf|credential|otp|passkey|password|secret|session|token|totp|key/i;
 
 const sanitizeError = (error) => ({
   name: error.name,
@@ -34,21 +34,26 @@ const sanitizeValue = (value, depth = 0) => {
 
 const sanitizeArgs = (args) => args.map((arg) => sanitizeValue(arg));
 
-const logger = {
-  info: (message, ...args) => {
-    console.log(`[INFO] ${new Date().toISOString()} - ${message}`, ...sanitizeArgs(args));
-  },
-  error: (message, ...args) => {
-    console.error(`[ERROR] ${new Date().toISOString()} - ${message}`, ...sanitizeArgs(args));
-  },
-  warn: (message, ...args) => {
-    console.warn(`[WARN] ${new Date().toISOString()} - ${message}`, ...sanitizeArgs(args));
-  },
-  debug: (message, ...args) => {
-    if (process.env.NODE_ENV !== 'production') {
-      console.debug(`[DEBUG] ${new Date().toISOString()} - ${message}`, ...sanitizeArgs(args));
-    }
+const installSafeConsole = () => {
+  if (console.__vaaniArcSafeConsoleInstalled) {
+    return;
   }
+
+  ['error', 'warn', 'log', 'debug'].forEach((method) => {
+    const originalMethod = console[method].bind(console);
+    console[method] = (...args) => originalMethod(...sanitizeArgs(args));
+  });
+
+  Object.defineProperty(console, '__vaaniArcSafeConsoleInstalled', {
+    value: true,
+    configurable: false,
+    enumerable: false,
+    writable: false
+  });
 };
 
-module.exports = logger;
+module.exports = {
+  installSafeConsole,
+  sanitizeArgs,
+  sanitizeValue
+};

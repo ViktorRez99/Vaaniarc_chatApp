@@ -365,7 +365,17 @@ if (typeof cleanupInterval.unref === 'function') {
 }
 
 const cacheService = {
-  connect: ensureRedisConnection,
+  async connect() {
+    const connection = await ensureRedisConnection();
+    const clusterEnabled = String(process.env.CLUSTER_ENABLED || '').toLowerCase() === 'true';
+    const workerCount = Number.parseInt(process.env.WEB_CONCURRENCY || process.env.CLUSTER_WORKERS || '1', 10);
+
+    if (clusterEnabled && workerCount > 1 && connection.mode !== 'redis') {
+      throw new Error('Redis is required for cluster mode. Set REDIS_URL.');
+    }
+
+    return connection;
+  },
   async disconnect() {
     const pendingConnection = redisState.connectPromise;
     let client = redisState.client;

@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 const {
   generateAuthenticationOptions,
@@ -8,6 +9,7 @@ const {
 
 const User = require('../models/User');
 const PasskeyCredential = require('../models/PasskeyCredential');
+const TwoFactor = require('../models/TwoFactor');
 const authenticateToken = require('../middleware/auth');
 const { authLimiter } = require('../middleware/rateLimiter');
 const { logLogin } = require('../middleware/auditLog');
@@ -22,6 +24,7 @@ const {
   toCredentialDescriptor
 } = require('../utils/webauthn');
 const { attachPasskeyEnrollmentStatus } = require('../utils/passkeyEnrollment');
+const { createTwoFactorLoginChallenge } = require('../utils/twoFactorSecurity');
 
 const router = express.Router();
 const requireCsrf = authenticateToken.requireCsrf;
@@ -34,6 +37,7 @@ const serializeUser = (user) => attachPasskeyEnrollmentStatus({
   id: user._id,
   username: user.username,
   email: user.email || null,
+  emailVerified: Boolean(user.emailVerified),
   bio: user.bio,
   firstName: user.firstName,
   lastName: user.lastName,
@@ -115,7 +119,7 @@ router.post('/register/options', authenticateToken, requireCsrf, async (req, res
       options
     });
   } catch (error) {
-    console.error('Passkey registration options error:', error);
+    logger.error('Passkey registration options error:', error);
     res.status(500).json({ message: 'Failed to prepare passkey registration.' });
   }
 });
@@ -180,7 +184,7 @@ router.post('/register/verify', authenticateToken, requireCsrf, async (req, res)
       passkey: serializePasskey(upsertedPasskey, req.deviceId || null)
     });
   } catch (error) {
-    console.error('Passkey registration verification error:', error);
+    logger.error('Passkey registration verification error:', error);
     res.status(500).json({ message: 'Failed to verify passkey registration.' });
   }
 });
@@ -228,7 +232,7 @@ router.post('/authenticate/options', authLimiter, async (req, res) => {
       options
     });
   } catch (error) {
-    console.error('Passkey authentication options error:', error);
+    logger.error('Passkey authentication options error:', error);
     res.status(500).json({ message: 'Failed to prepare passkey sign-in.' });
   }
 });
@@ -290,6 +294,15 @@ router.post('/authenticate/verify', authLimiter, async (req, res) => {
       return res.status(401).json({ message: 'That account is no longer available.' });
     }
 
+    const twoFactor = await TwoFactor.findOne({ user: user._id, enabled: true }).select('_id');
+    if (twoFactor) {
+      return res.json({
+        requires2FA: true,
+        partialToken: createTwoFactorLoginChallenge(user._id, { method: 'passkey' }),
+        message: 'Enter your authenticator code to continue.'
+      });
+    }
+
     user.lastSeen = new Date();
     user.status = 'online';
     await user.save({ validateBeforeSave: false });
@@ -317,7 +330,7 @@ router.post('/authenticate/verify', authLimiter, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Passkey authentication verification error:', error);
+    logger.error('Passkey authentication verification error:', error);
     res.status(500).json({ message: 'Failed to verify passkey sign-in.' });
   }
 });
@@ -333,7 +346,7 @@ router.get('/credentials', authenticateToken, async (req, res) => {
       passkeys: passkeys.map((passkey) => serializePasskey(passkey, req.deviceId || null))
     });
   } catch (error) {
-    console.error('Passkey list error:', error);
+    logger.error('Passkey list error:', error);
     res.status(500).json({ message: 'Failed to load passkeys.' });
   }
 });
@@ -358,7 +371,7 @@ router.delete('/credentials/:credentialId', authenticateToken, requireCsrf, asyn
       passkey: serializePasskey(passkey, req.deviceId || null)
     });
   } catch (error) {
-    console.error('Passkey revoke error:', error);
+    logger.error('Passkey revoke error:', error);
     res.status(500).json({ message: 'Failed to revoke passkey.' });
   }
 });

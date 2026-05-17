@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 const router = express.Router();
 const Meeting = require('../models/Meeting');
@@ -23,7 +24,7 @@ router.post('/meetings', async (req, res) => {
 
     res.status(201).json(meeting);
   } catch (error) {
-    console.error('Error creating meeting:', error);
+    logger.error('Error creating meeting:', error);
     res.status(500).json({ message: 'Failed to create meeting' });
   }
 });
@@ -52,7 +53,7 @@ router.get('/meetings', async (req, res) => {
 
     res.json(meetings);
   } catch (error) {
-    console.error('Error fetching meetings:', error);
+    logger.error('Error fetching meetings:', error);
     res.status(500).json({ message: 'Failed to fetch meetings' });
   }
 });
@@ -72,7 +73,7 @@ router.get('/meetings/:meetingId', async (req, res) => {
 
     res.json(meeting);
   } catch (error) {
-    console.error('Error fetching meeting:', error);
+    logger.error('Error fetching meeting:', error);
     res.status(500).json({ message: 'Failed to fetch meeting' });
   }
 });
@@ -114,7 +115,7 @@ router.post('/meetings/:meetingId/join', async (req, res) => {
 
     res.json(meeting);
   } catch (error) {
-    console.error('Error joining meeting:', error);
+    logger.error('Error joining meeting:', error);
     res.status(500).json({ message: 'Failed to join meeting' });
   }
 });
@@ -152,7 +153,7 @@ router.post('/meetings/:meetingId/leave', async (req, res) => {
 
     res.json({ message: 'Left meeting successfully', meeting });
   } catch (error) {
-    console.error('Error leaving meeting:', error);
+    logger.error('Error leaving meeting:', error);
     res.status(500).json({ message: 'Failed to leave meeting' });
   }
 });
@@ -188,7 +189,7 @@ router.post('/meetings/:meetingId/end', async (req, res) => {
 
     res.json({ message: 'Meeting ended successfully', meeting });
   } catch (error) {
-    console.error('Error ending meeting:', error);
+    logger.error('Error ending meeting:', error);
     res.status(500).json({ message: 'Failed to end meeting' });
   }
 });
@@ -216,7 +217,7 @@ router.patch('/meetings/:meetingId/settings', async (req, res) => {
 
     res.json(meeting);
   } catch (error) {
-    console.error('Error updating meeting settings:', error);
+    logger.error('Error updating meeting settings:', error);
     res.status(500).json({ message: 'Failed to update meeting settings' });
   }
 });

@@ -73,7 +73,7 @@ describe('backend smoke checks', () => {
     const response = await request(app).get('/api/auth/profile');
 
     expect(response.status).toBe(401);
-    expect(response.body).toEqual({ message: 'Access token or session required' });
+    expect(response.body).toEqual({ message: 'Authentication required.' });
   });
 });
 

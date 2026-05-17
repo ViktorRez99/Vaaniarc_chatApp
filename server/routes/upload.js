@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 const fs = require('fs/promises');
 const multer = require('multer');
@@ -34,6 +35,7 @@ const {
   isUploadMimeAllowed,
   validateStoredUpload
 } = require('../utils/uploadValidation');
+const { isBlockedBetween } = require('../utils/userBlocks');
 
 const router = express.Router();
 
@@ -63,7 +65,7 @@ const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: parseInt(process.env.MAX_FILE_SIZE) || 10485760, // 10MB default
+    fileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 10485760, // 10MB default
     files: 1
   }
 });
@@ -77,7 +79,7 @@ const cleanupUploadedFile = async (filePath) => {
     await fs.unlink(filePath);
   } catch (error) {
     if (error.code !== 'ENOENT') {
-      console.error('Failed to remove duplicate upload:', error);
+      logger.error('Failed to remove duplicate upload:', error);
     }
   }
 };
@@ -88,7 +90,7 @@ const cleanupAndRespond = async (filePath, res, statusCode, payload) => {
 };
 
 // Upload file and send as message to room (group chat)
-router.post('/file', upload.single('file'), async (req, res) => {
+const handleRoomFileUpload = async (req, res) => {
   try {
     const { roomId, messageType = 'file', encryptedFilePayload, tempId, expiresInSeconds, isViewOnce } = req.body;
 
@@ -172,7 +174,7 @@ router.post('/file', upload.single('file'), async (req, res) => {
     const category = isEncryptedAttachment ? 'encrypted' : getFileCategory(req.file.mimetype);
     let actualMessageType = messageType;
     if (isEncryptedAttachment) {
-      actualMessageType = 'file';
+      actualMessageType = ['audio', 'video', 'image'].includes(messageType) ? messageType : 'file';
     } else if (category === 'image') {
       actualMessageType = 'image';
     } else if (category === 'video') {
@@ -263,7 +265,7 @@ router.post('/file', upload.single('file'), async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('File upload error:', error);
+    logger.error('File upload error:', error);
     await cleanupUploadedFile(req.file?.path);
     
     if (error.code === 'LIMIT_FILE_SIZE') {
@@ -282,7 +284,10 @@ router.post('/file', upload.single('file'), async (req, res) => {
     
     res.status(500).json({ message: error.message || 'Server error uploading file' });
   }
-});
+};
+
+router.post('/file', upload.single('file'), handleRoomFileUpload);
+router.post('/room-file', upload.single('file'), handleRoomFileUpload);
 
 // Upload file and send as message to private chat
 router.post('/chat-file', upload.single('file'), async (req, res) => {
@@ -312,6 +317,12 @@ router.post('/chat-file', upload.single('file'), async (req, res) => {
     if (!arrayIncludesId(chat.participants, req.user._id)) {
       return cleanupAndRespond(req.file.path, res, 403, {
         message: 'Access denied. Not a participant in this chat.' 
+      });
+    }
+    const otherParticipantId = chat.participants.find((participantId) => !arrayIncludesId([participantId], req.user._id));
+    if (otherParticipantId && await isBlockedBetween(req.user._id, otherParticipantId)) {
+      return cleanupAndRespond(req.file.path, res, 403, {
+        message: 'Messaging is unavailable for this chat.'
       });
     }
 
@@ -369,7 +380,7 @@ router.post('/chat-file', upload.single('file'), async (req, res) => {
     const category = isEncryptedAttachment ? 'encrypted' : getFileCategory(req.file.mimetype);
     let actualMessageType = messageType;
     if (isEncryptedAttachment) {
-      actualMessageType = 'file';
+      actualMessageType = ['audio', 'video', 'image'].includes(messageType) ? messageType : 'file';
     } else if (category === 'image') {
       actualMessageType = 'image';
     } else if (category === 'video') {
@@ -468,7 +479,7 @@ router.post('/chat-file', upload.single('file'), async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Chat file upload error:', error);
+    logger.error('Chat file upload error:', error);
     await cleanupUploadedFile(req.file?.path);
     
     if (error.code === 'LIMIT_FILE_SIZE') {
@@ -525,7 +536,7 @@ router.post('/avatar', upload.single('avatar'), async (req, res) => {
       avatar: avatarUrl
     });
   } catch (error) {
-    console.error('Avatar upload error:', error);
+    logger.error('Avatar upload error:', error);
     await cleanupUploadedFile(req.file?.path);
     
     if (error.code === 'LIMIT_FILE_SIZE') {
@@ -576,7 +587,7 @@ router.get('/file/:filename', async (req, res) => {
       uploadedAt: message.createdAt
     });
   } catch (error) {
-    console.error('Get file info error:', error);
+    logger.error('Get file info error:', error);
     res.status(500).json({ message: 'Server error getting file info' });
   }
 });
@@ -609,7 +620,7 @@ router.delete('/file/:filename', async (req, res) => {
 
     res.json({ message: 'File deleted successfully' });
   } catch (error) {
-    console.error('Delete file error:', error);
+    logger.error('Delete file error:', error);
     res.status(500).json({ message: 'Server error deleting file' });
   }
 });

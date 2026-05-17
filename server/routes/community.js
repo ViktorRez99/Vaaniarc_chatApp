@@ -4,6 +4,7 @@ const Community = require('../models/Community');
 const { buildUniqueSlug } = require('../utils/slug');
 const logger = require('../utils/logger');
 const { arrayIncludesId } = require('../utils/idHelpers');
+const { buildSafeSearchRegex } = require('../utils/validation');
 
 const router = express.Router();
 
@@ -36,9 +37,10 @@ router.get('/communities', async (req, res) => {
     };
 
     if (search) {
+      const safeRegex = buildSafeSearchRegex(search);
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+        { name: safeRegex },
+        { description: safeRegex }
       ];
     }
 
@@ -47,12 +49,9 @@ router.get('/communities', async (req, res) => {
       .populate('admins', 'username avatar')
       .sort({ lastActivity: -1 });
 
-    res.json(communities.map((community) => serializeCommunity(community, userId)));
-  } catch (error) {
-    logger.error('Community list error', error);
-    res.status(500).json({ message: 'Failed to fetch communities' });
-  }
-});
+    res.json({
+      communities: communities.map((c) => ({...serializeCommunity(c, userId), isJoined: true}))
+    });
 
 router.get('/communities/discover', async (req, res) => {
   try {
@@ -72,9 +71,10 @@ router.get('/communities/discover', async (req, res) => {
     };
 
     if (search) {
+      const safeRegex = buildSafeSearchRegex(search);
       query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+        { name: safeRegex },
+        { description: safeRegex }
       ];
     }
 

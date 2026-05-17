@@ -613,7 +613,7 @@ const ChannelsPage = () => {
                   onClick={() => setCommunityForm((currentValue) => ({ ...currentValue, visibility }))}
                   className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
                     communityForm.visibility === visibility
-                      ? 'border-emerald-400/40 bg-accent text-void hover:brightness-110/20 text-emerald-100'
+                      ? 'border-emerald-400/40 bg-accent hover:brightness-110/20 text-emerald-100'
                       : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10'
                   }`}
                 >

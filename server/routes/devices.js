@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 
 const router = express.Router();
@@ -35,7 +36,7 @@ router.get('/', async (req, res) => {
       devices: devices.map((device) => serializeDevice(device, currentDeviceId))
     });
   } catch (error) {
-    console.error('Devices fetch error:', error);
+    logger.error('Devices fetch error:', error);
     res.status(500).json({ message: 'Failed to fetch devices' });
   }
 });
@@ -103,7 +104,7 @@ router.post('/', async (req, res) => {
       isNew
     });
   } catch (error) {
-    console.error('Device registration error:', error);
+    logger.error('Device registration error:', error);
     res.status(500).json({ message: 'Failed to register device' });
   }
 });
@@ -144,7 +145,7 @@ router.patch('/:deviceId', async (req, res) => {
       device: serializeDevice(device, req.deviceId || req.headers[CURRENT_DEVICE_HEADER] || null)
     });
   } catch (error) {
-    console.error('Device update error:', error);
+    logger.error('Device update error:', error);
     res.status(500).json({ message: 'Failed to update device' });
   }
 });
@@ -187,7 +188,7 @@ router.delete('/:deviceId', async (req, res) => {
       device: serializeDevice(device, currentDeviceId)
     });
   } catch (error) {
-    console.error('Device deletion error:', error);
+    logger.error('Device deletion error:', error);
     res.status(500).json({ message: 'Failed to revoke device' });
   }
 });
@@ -207,7 +208,7 @@ router.post('/:deviceId/activity', async (req, res) => {
 
     res.json({ message: 'Activity updated' });
   } catch (error) {
-    console.error('Device activity update error:', error);
+    logger.error('Device activity update error:', error);
     res.status(500).json({ message: 'Failed to update activity' });
   }
 });

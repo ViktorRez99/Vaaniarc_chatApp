@@ -36,7 +36,12 @@ const ChatHub = () => {
 
   const handleStatusChange = async (status) => {
     setCurrentStatus(status); setShowStatusMenu(false);
-    try { await api.patch('/auth/status', { status }) } catch { setCurrentStatus(user?.status || 'online') }
+    try {
+      await api.patch('/auth/status', { status });
+    } catch (statusError) {
+      console.error('Failed to update user status:', statusError);
+      setCurrentStatus(user?.status || 'online');
+    }
   };
 
   const handleQuickMeeting = useCallback(() => {

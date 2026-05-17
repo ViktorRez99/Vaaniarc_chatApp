@@ -1,7 +1,9 @@
 import {
+  Ban,
   Calendar,
   Clock,
   Copy,
+  Flag,
   MessageCircle,
   Phone,
   RefreshCw,
@@ -12,7 +14,7 @@ import {
   Video,
   X
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import cryptoService from '../services/cryptoService';
@@ -25,12 +27,37 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
   const [securityLoading, setSecurityLoading] = useState(false);
   const [securityError, setSecurityError] = useState('');
   const [securitySuccess, setSecuritySuccess] = useState('');
+  const [isBlocked, setIsBlocked] = useState(Boolean(initialUser?.isBlockedByMe));
+  const [profileActionLoading, setProfileActionLoading] = useState('');
+  const [profileActionError, setProfileActionError] = useState('');
+  const [profileActionSuccess, setProfileActionSuccess] = useState('');
+  const [showReportForm, setShowReportForm] = useState(false);
+  const [reportDetails, setReportDetails] = useState('');
+  const timeoutRefs = useRef(new Set());
+
+  const scheduleTimeout = useCallback((callback, delay) => {
+    const timeoutId = window.setTimeout(() => {
+      timeoutRefs.current.delete(timeoutId);
+      callback();
+    }, delay);
+    timeoutRefs.current.add(timeoutId);
+    return timeoutId;
+  }, []);
+
+  useEffect(() => () => {
+    timeoutRefs.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    timeoutRefs.current.clear();
+  }, []);
 
   useEffect(() => {
     setUser(initialUser);
+    setIsBlocked(Boolean(initialUser?.isBlockedByMe));
+    setProfileActionError('');
+    setProfileActionSuccess('');
+    setShowReportForm(false);
+    setReportDetails('');
   }, [initialUser]);
 
-  // Refresh contact data when the viewed user changes.
   useEffect(() => {
     if (!initialUser?._id) {
       return;
@@ -38,12 +65,11 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
 
     void fetchUserDetails();
     void fetchSecurityInfo();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialUser?._id]);
 
   const showTransientMessage = (setter, message) => {
     setter(message);
-    window.setTimeout(() => setter(''), 3000);
+    scheduleTimeout(() => setter(''), 3000);
   };
 
   const fetchUserDetails = async () => {
@@ -92,7 +118,8 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
     try {
       await navigator.clipboard.writeText(securityInfo.fingerprint);
       showTransientMessage(setSecuritySuccess, 'Fingerprint copied.');
-    } catch {
+    } catch (copyError) {
+      console.error('Failed to copy contact fingerprint:', copyError);
       showTransientMessage(setSecurityError, 'Failed to copy the fingerprint.');
     }
   };
@@ -122,6 +149,71 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
       showTransientMessage(setSecuritySuccess, 'Contact verification removed.');
     } catch (error) {
       showTransientMessage(setSecurityError, error.message || 'Failed to remove verification.');
+    }
+  };
+
+  const handleToggleBlock = async () => {
+    if (!user?._id) {
+      return;
+    }
+
+    const username = user.username || 'this user';
+    if (!isBlocked && !window.confirm(`Block ${username}? You will no longer receive messages from this account.`)) {
+      return;
+    }
+
+    setProfileActionLoading('block');
+    setProfileActionError('');
+    setProfileActionSuccess('');
+
+    try {
+      if (isBlocked) {
+        await api.delete(`/auth/users/${user._id}/block`);
+        setIsBlocked(false);
+        showTransientMessage(setProfileActionSuccess, `${username} has been unblocked.`);
+      } else {
+        await api.post(`/auth/users/${user._id}/block`, { reason: 'user_action' });
+        setIsBlocked(true);
+        setShowReportForm(false);
+        showTransientMessage(setProfileActionSuccess, `${username} has been blocked.`);
+      }
+    } catch (error) {
+      showTransientMessage(
+        setProfileActionError,
+        error.message || `Failed to ${isBlocked ? 'unblock' : 'block'} this user.`
+      );
+    } finally {
+      setProfileActionLoading('');
+    }
+  };
+
+  const handleSubmitReport = async () => {
+    if (!user?._id) {
+      return;
+    }
+
+    const details = reportDetails.trim();
+    if (details.length < 8) {
+      showTransientMessage(setProfileActionError, 'Add a short report reason before submitting.');
+      return;
+    }
+
+    setProfileActionLoading('report');
+    setProfileActionError('');
+    setProfileActionSuccess('');
+
+    try {
+      await api.post(`/auth/users/${user._id}/report`, {
+        reason: 'abuse',
+        details
+      });
+      setReportDetails('');
+      setShowReportForm(false);
+      showTransientMessage(setProfileActionSuccess, 'Report submitted for review.');
+    } catch (error) {
+      showTransientMessage(setProfileActionError, error.message || 'Failed to submit report.');
+    } finally {
+      setProfileActionLoading('');
     }
   };
 
@@ -418,11 +510,71 @@ const UserProfile = ({ user: initialUser, onClose, onStartChat }) => {
       </div>
 
       <div className="p-4 border-t border-[#2a2f32] space-y-2">
-        <button className="w-full px-4 py-3 bg-[#202c33] hover:bg-[#2a3942] text-[#ea4335] rounded-lg transition-all flex items-center justify-center space-x-2 focus:outline-none">
-          <span>Block {user?.username || 'User'}</span>
+        {profileActionError && (
+          <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            {profileActionError}
+          </div>
+        )}
+
+        {profileActionSuccess && (
+          <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+            {profileActionSuccess}
+          </div>
+        )}
+
+        {showReportForm && (
+          <div className="rounded-xl border border-white/10 bg-slate-900/40 p-3 space-y-3">
+            <textarea
+              value={reportDetails}
+              onChange={(event) => setReportDetails(event.target.value)}
+              rows={3}
+              maxLength={500}
+              placeholder="Describe the safety issue"
+              className="w-full resize-none rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-[#e9edef] placeholder:text-[#8696a0] focus:border-[#00a884] focus:outline-none"
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => void handleSubmitReport()}
+                disabled={profileActionLoading === 'report'}
+                className="flex-1 px-3 py-2 rounded-lg bg-red-500/15 hover:bg-red-500/25 disabled:opacity-50 disabled:cursor-not-allowed text-sm text-red-100 transition-colors"
+              >
+                Submit Report
+              </button>
+              <button
+                onClick={() => {
+                  setShowReportForm(false);
+                  setReportDetails('');
+                }}
+                disabled={profileActionLoading === 'report'}
+                className="px-3 py-2 rounded-lg bg-[#202c33] hover:bg-[#2a3942] disabled:opacity-50 text-sm text-[#e9edef] transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        <button
+          onClick={() => void handleToggleBlock()}
+          disabled={profileActionLoading === 'block'}
+          className="w-full px-4 py-3 bg-[#202c33] hover:bg-[#2a3942] disabled:opacity-50 disabled:cursor-not-allowed text-[#ea4335] rounded-lg transition-all flex items-center justify-center space-x-2 focus:outline-none"
+        >
+          <Ban className="w-4 h-4" />
+          <span>
+            {profileActionLoading === 'block'
+              ? 'Updating...'
+              : isBlocked
+                ? `Unblock ${user?.username || 'User'}`
+                : `Block ${user?.username || 'User'}`}
+          </span>
         </button>
-        <button className="w-full px-4 py-3 bg-[#202c33] hover:bg-[#2a3942] text-[#e9edef] rounded-lg transition-all flex items-center justify-center space-x-2 focus:outline-none">
-          <span>Clear Chat</span>
+        <button
+          onClick={() => setShowReportForm((value) => !value)}
+          disabled={profileActionLoading === 'report'}
+          className="w-full px-4 py-3 bg-[#202c33] hover:bg-[#2a3942] disabled:opacity-50 disabled:cursor-not-allowed text-[#e9edef] rounded-lg transition-all flex items-center justify-center space-x-2 focus:outline-none"
+        >
+          <Flag className="w-4 h-4" />
+          <span>Report {user?.username || 'User'}</span>
         </button>
       </div>
     </div>

@@ -192,7 +192,12 @@ const decryptPayload = async (userId, deviceId, encryptedPayload) => {
     arrayBufferFromBase64(encryptedPayload.ciphertext)
   );
 
-  return JSON.parse(textDecoder.decode(decrypted));
+  try {
+    return JSON.parse(textDecoder.decode(decrypted));
+  } catch (error) {
+    console.error('Failed to parse protected key-store payload:', error);
+    return null;
+  }
 };
 
 const stripIndexedDbMetadata = (record = {}, extraFields = []) => {

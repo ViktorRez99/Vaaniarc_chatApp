@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { 
   Search, Plus, Send, Paperclip, Smile, MoreVertical, 
   Phone, Video, Info, ArrowLeft, Check, CheckCheck,
   Image as ImageIcon, Mic, X, MessageCircle, Zap,
-  Reply, Pencil, Trash2, Pin, Forward, FileText, Users
+  Reply, Pencil, Trash2, Pin, Forward, FileText, Users,
+  Lock, AlertCircle, Archive, Inbox
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import socketService from '../services/socket';
@@ -15,6 +16,7 @@ import RoomsPage from './RoomsPage';
 import ChannelsPage from './ChannelsPage';
 import MessageAttachmentCard from './MessageAttachmentCard';
 import ForwardMessageDialog from './ForwardMessageDialog';
+import { toast } from './ui/Toaster';
 import { idsEqual, normalizeId } from '../utils/identity';
 import {
   buildForwardedFromPayload,
@@ -44,6 +46,8 @@ const ChatsPage = () => {
   const [showUserList, setShowUserList] = useState(false);
   const [users, setUsers] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
   const [showProfile, setShowProfile] = useState(false);
   const [selectedUser, setSelectedUser] = useState(null);
   const [searchResults, setSearchResults] = useState([]);
@@ -60,22 +64,70 @@ const ChatsPage = () => {
   const selectedChatRef = useRef(null);
   const fileInputRef = useRef(null);
   const audioInputRef = useRef(null);
+  const voiceRecorderRef = useRef(null);
+  const voiceChunksRef = useRef([]);
+  const voiceStreamRef = useRef(null);
+  const voiceStartedAtRef = useRef(null);
+  const chatsRef = useRef([]);
+  const socketHandlersRef = useRef({});
+  const socketListenerRefs = useRef(new Map());
+  const uiTimeoutRefs = useRef(new Set());
+  const currentUserId = normalizeId(user?._id || user?.id);
+  const encryptionBlocked = encryptionState?.status !== 'ready';
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [voiceStartedAt, setVoiceStartedAt] = useState(null);
+
+  const showChatError = (title, description) => {
+    toast({
+      title,
+      description,
+      variant: 'error'
+    });
+  };
+
+  const scheduleUiTimeout = (callback, delay) => {
+    const timeoutId = window.setTimeout(() => {
+      uiTimeoutRefs.current.delete(timeoutId);
+      callback();
+    }, delay);
+    uiTimeoutRefs.current.add(timeoutId);
+    return timeoutId;
+  };
   
   // Keep the ref in sync with state
   useEffect(() => {
     selectedChatRef.current = selectedChat;
-  }, [selectedChat]);
+  }, [selectedChat, currentUserId]);
+
+  useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
 
   // Register the page-level socket listeners once against the shared socket service.
   useEffect(() => {
-    fetchChats();
     setupSocketListeners();
     
     return () => {
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
+      if (voiceRecorderRef.current?.state === 'recording') {
+        voiceRecorderRef.current.ondataavailable = null;
+        voiceRecorderRef.current.onstop = null;
+        voiceRecorderRef.current.stop();
+      }
+      voiceStreamRef.current?.getTracks?.().forEach((track) => track.stop());
+      voiceStreamRef.current = null;
+      uiTimeoutRefs.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      uiTimeoutRefs.current.clear();
       cleanupSocketListeners();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    void fetchChats();
+  }, [showArchived]);
 
   useEffect(() => {
     const openGroups = () => setActiveMode('rooms');
@@ -99,7 +151,7 @@ const ChatsPage = () => {
       if (searchQuery.trim().length > 0) {
         setIsSearching(true);
         try {
-          const response = await api.get(`/users?search=${searchQuery}`);
+          const response = await api.get(`/users?search=${encodeURIComponent(searchQuery.trim())}`);
           setSearchResults(response || []);
         } catch (error) {
           console.error('Error searching users:', error);
@@ -123,6 +175,11 @@ const ChatsPage = () => {
       return;
     }
 
+    if (selectedChat.suppressInitialHistory) {
+      setPinnedMessages([]);
+      return;
+    }
+
     fetchMessages(selectedChat._id);
     fetchPinnedMessages(selectedChat._id);
     markMessagesAsRead(selectedChat._id);
@@ -136,9 +193,48 @@ const ChatsPage = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
+  const shouldShowDateSeparator = (currentMessage, previousMessage) => {
+    if (!currentMessage?.createdAt) {
+      return false;
+    }
+
+    if (!previousMessage?.createdAt) {
+      return true;
+    }
+
+    return new Date(currentMessage.createdAt).toDateString() !== new Date(previousMessage.createdAt).toDateString();
+  };
+
+  const formatDateSeparator = (date) => {
+    const messageDate = new Date(date);
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+
+    if (messageDate.toDateString() === today.toDateString()) {
+      return 'Today';
+    }
+
+    if (messageDate.toDateString() === yesterday.toDateString()) {
+      return 'Yesterday';
+    }
+
+    return messageDate.toLocaleDateString(undefined, {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: messageDate.getFullYear() === today.getFullYear() ? undefined : 'numeric'
+    });
+  };
+
+  const isEncryptedPlaceholder = (message) => (
+    message?.content === cryptoService.encryptedPlaceholder
+    || message?.content === '[Encrypted message unavailable on this device]'
+  );
+
   const fetchChats = async () => {
     try {
-      const response = await api.get('/chats');
+      const response = await api.get(`/chats${showArchived ? '?archived=true' : ''}`);
       const nextChats = await cryptoService.hydratePrivateChats(Array.isArray(response) ? response : []);
       setChats(nextChats);
     } catch (error) {
@@ -148,6 +244,10 @@ const ChatsPage = () => {
   };
 
   const fetchMessages = async (chatId) => {
+    if (!currentUserId) {
+      return;
+    }
+
     try {
       const response = await api.get(`/chats/${chatId}/messages`);
       const nextMessages = await cryptoService.hydratePrivateMessages(Array.isArray(response) ? response : []);
@@ -181,31 +281,32 @@ const ChatsPage = () => {
   };
 
   const setupSocketListeners = () => {
-    socketService.on('private_message', handleNewMessage);
-    socketService.on('message_sent', handleMessageSent);
-    socketService.on('user_typing', handleUserTyping);
-    socketService.on('user_stop_typing', handleUserStopTyping);
-    socketService.on('messages_read', handleMessagesRead);
-    socketService.on('call_request_sent', handleCallRequestSent);
-    socketService.on('incoming_call', handleIncomingCall);
-    socketService.on('private_message_reaction', handlePrivateMessageReaction);
-    socketService.on('private_message_edit', handlePrivateMessageEdit);
-    socketService.on('private_message_delete', handlePrivateMessageDelete);
-    socketService.on('private_message_pin', handlePrivateMessagePin);
+    const listeners = [
+      ['private_message', 'handleNewMessage'],
+      ['message_sent', 'handleMessageSent'],
+      ['user_typing', 'handleUserTyping'],
+      ['user_stop_typing', 'handleUserStopTyping'],
+      ['messages_read', 'handleMessagesRead'],
+      ['call_request_sent', 'handleCallRequestSent'],
+      ['incoming_call', 'handleIncomingCall'],
+      ['private_message_reaction', 'handlePrivateMessageReaction'],
+      ['private_message_edit', 'handlePrivateMessageEdit'],
+      ['private_message_delete', 'handlePrivateMessageDelete'],
+      ['private_message_pin', 'handlePrivateMessagePin']
+    ];
+
+    listeners.forEach(([eventName, handlerName]) => {
+      const listener = (payload) => socketHandlersRef.current[handlerName]?.(payload);
+      socketListenerRefs.current.set(eventName, listener);
+      socketService.on(eventName, listener);
+    });
   };
 
   const cleanupSocketListeners = () => {
-    socketService.off('private_message', handleNewMessage);
-    socketService.off('message_sent', handleMessageSent);
-    socketService.off('user_typing', handleUserTyping);
-    socketService.off('user_stop_typing', handleUserStopTyping);
-    socketService.off('messages_read', handleMessagesRead);
-    socketService.off('call_request_sent', handleCallRequestSent);
-    socketService.off('incoming_call', handleIncomingCall);
-    socketService.off('private_message_reaction', handlePrivateMessageReaction);
-    socketService.off('private_message_edit', handlePrivateMessageEdit);
-    socketService.off('private_message_delete', handlePrivateMessageDelete);
-    socketService.off('private_message_pin', handlePrivateMessagePin);
+    socketListenerRefs.current.forEach((listener, eventName) => {
+      socketService.off(eventName, listener);
+    });
+    socketListenerRefs.current.clear();
   };
 
   const syncPinnedMessageState = (nextMessage) => {
@@ -347,21 +448,23 @@ const ChatsPage = () => {
 
   const handleUserStopTyping = ({ chatId, userId }) => {
     const currentSelectedChat = selectedChatRef.current;
-    if (currentSelectedChat && idsEqual(chatId, currentSelectedChat._id)) {
-      setTypingUsers(prev => {
-        const updated = new Set(prev);
-        // Remove by matching user
-        setChats(currentChats => {
-          const chat = currentChats.find(c => idsEqual(c._id, chatId));
-          const typingUser = chat?.participants.find(p => idsEqual(p._id, userId));
-          if (typingUser) {
-            updated.delete(typingUser.username);
-          }
-          return currentChats;
-        });
-        return updated;
-      });
+    if (!currentSelectedChat || !idsEqual(chatId, currentSelectedChat._id) || !userId) {
+      return;
     }
+
+    const chat = chatsRef.current.find((entry) => idsEqual(entry._id, chatId));
+    const typingUser = chat?.participants?.find((participant) => idsEqual(participant?._id || participant, userId));
+    const targetUsername = typingUser?.username;
+
+    if (!targetUsername) {
+      return;
+    }
+
+    setTypingUsers((currentValue) => {
+      const nextValue = new Set(currentValue);
+      nextValue.delete(targetUsername);
+      return nextValue;
+    });
   };
 
   const handleMessagesRead = ({ chatId }) => {
@@ -403,13 +506,61 @@ const ChatsPage = () => {
     updateMessageEverywhere(hydratedMessage);
   };
 
+  useEffect(() => {
+    socketHandlersRef.current = {
+      handleNewMessage,
+      handleMessageSent,
+      handleUserTyping,
+      handleUserStopTyping,
+      handleMessagesRead,
+      handleCallRequestSent,
+      handleIncomingCall,
+      handlePrivateMessageReaction,
+      handlePrivateMessageEdit,
+      handlePrivateMessageDelete,
+      handlePrivateMessagePin
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const ensurePersistedChat = async (chat = selectedChat, fallbackRecipient = selectedUser) => {
+    if (chat?._id) {
+      return chat;
+    }
+
+    const recipient = getOtherParticipant(chat) || fallbackRecipient;
+    if (!recipient?._id) {
+      throw new Error('Recipient encryption key is unavailable');
+    }
+
+    const createdChat = await api.post('/chats', { recipientId: recipient._id });
+    const nextChat = {
+      ...createdChat,
+      suppressInitialHistory: true
+    };
+    const nextRecipient = getOtherParticipant(nextChat) || recipient;
+    setSelectedUser(nextRecipient);
+    setSelectedChat(nextChat);
+    return nextChat;
+  };
+
   const handleSendMessage = async (e) => {
     e.preventDefault();
     
     if (!messageInput.trim() || !selectedChat) return;
+    if (encryptionBlocked) {
+      showChatError(
+        'Encryption not ready',
+        encryptionState?.message || 'Import your key backup to send encrypted messages.'
+      );
+      return;
+    }
+
+    let pendingTempId = null;
 
     try {
       const content = messageInput.trim();
+      let activeChat = selectedChat;
+      let recipient = getOtherParticipant(activeChat) || selectedUser;
 
       if (editingMessage?._id) {
         const response = await api.editMessage(editingMessage._id, content, editingMessage.updatedAt);
@@ -422,62 +573,126 @@ const ChatsPage = () => {
         return;
       }
 
-      const recipient = getOtherParticipant(selectedChat) || selectedUser;
-
       if (!recipient?._id) {
         throw new Error('Recipient encryption key is unavailable');
       }
 
-      const encryptedContent = await cryptoService.encryptTextForUsers(content, [
-        recipient._id,
-        user?._id || user?.id
-      ]);
+      if (activeChat?.isDraft || !activeChat?._id) {
+        const createdChat = await api.post('/chats', { recipientId: recipient._id });
+        activeChat = {
+          ...createdChat,
+          suppressInitialHistory: true
+        };
+        setSelectedChat(activeChat);
+        recipient = getOtherParticipant(activeChat) || recipient;
+      }
+
+      if (!activeChat?._id) {
+        throw new Error('Chat could not be initialized.');
+      }
+
       const tempId = `temp-${Date.now()}`;
+      pendingTempId = tempId;
+      const replyTargetSnapshot = replyTarget;
       setMessageInput('');
       
       // Stop typing indicator
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
       }
-      socketService.emit('typing_stop', { chatId: selectedChat._id });
+      socketService.emit('typing_stop', { chatId: activeChat._id });
 
       // Create optimistic message to show immediately
       const optimisticMessage = {
         _id: tempId, // Temporary ID to map server confirmation
-        chatId: selectedChat._id,
+        chatId: activeChat._id,
         sender: {
           _id: user?._id || user?.id,
           username: user.username,
           avatar: user.avatar
         },
         content,
+        decryptedContent: content,
         messageType: 'text',
         createdAt: new Date().toISOString(),
         read: false,
         expiresInSeconds: disappearingTimer,
         expiresAt: computeExpiresAt(disappearingTimer),
-        replyTo: replyTarget ? { ...replyTarget, replyTo: null } : null,
+        replyTo: replyTargetSnapshot ? { ...replyTargetSnapshot, replyTo: null } : null,
         tempId,
-        isOptimistic: true // Flag to identify optimistic messages
+        isOptimistic: true,
+        isSending: true
       };
 
       setMessages(prev => [...prev, optimisticMessage]);
       setReplyTarget(null);
 
-      // Send via socket for real-time delivery
-      socketService.sendPrivateMessage(
-        selectedChat._id,
-        cryptoService.encryptedPlaceholder,
-        'text',
-        null,
-        encryptedContent,
-        disappearingTimer,
-        tempId,
-        replyTarget?._id || null
-      );
+      const encryptedContent = await cryptoService.encryptTextForUsers(content, [
+        recipient._id,
+        user?._id || user?.id
+      ]);
+
+      try {
+        const response = await api.sendChatMessage(activeChat._id, {
+          content: cryptoService.encryptedPlaceholder,
+          encryptedContent,
+          messageType: 'text',
+          expiresInSeconds: disappearingTimer,
+          tempId,
+          replyTo: replyTargetSnapshot?._id || null
+        });
+        const persistedMessage = await cryptoService.hydratePrivateMessage(response?.message || response?.data || response);
+        if (persistedMessage) {
+          const displayMessage = isEncryptedPlaceholder(persistedMessage)
+            ? {
+                ...persistedMessage,
+                content,
+                decryptedContent: content,
+                decryptFailed: false
+              }
+            : persistedMessage;
+          setMessages(prev => prev.map(message => (
+            message.tempId === tempId
+              ? { ...displayMessage, isOptimistic: false, isSending: false }
+              : message
+          )));
+          fetchChats();
+        }
+      } catch (restError) {
+        try {
+          socketService.sendPrivateMessage(
+            activeChat._id,
+            cryptoService.encryptedPlaceholder,
+            'text',
+            null,
+            encryptedContent,
+            disappearingTimer,
+            tempId,
+            replyTargetSnapshot?._id || null
+          );
+        } catch (socketError) {
+          const errorMessage = socketError?.message
+            || socketError?.description
+            || restError?.message
+            || 'Failed to send encrypted message.';
+          setMessages(prev => prev.map(message => (
+            message.tempId === tempId
+              ? { ...message, isSending: false, sendFailed: true, errorMessage }
+              : message
+          )));
+        }
+      }
     } catch (error) {
       console.error('Error sending message:', error);
-      window.alert(error.message || 'Failed to send encrypted message.');
+      if (!pendingTempId) {
+        showChatError('Message not sent', error.message || 'Failed to send encrypted message.');
+        return;
+      }
+      setMessages(prev => prev.map(message => (
+        pendingTempId && message.tempId === pendingTempId
+          ? { ...message, isSending: false, sendFailed: true, errorMessage: error.message || 'Failed to send encrypted message.' }
+          : message
+      )));
     }
   };
 
@@ -494,13 +709,47 @@ const ChatsPage = () => {
 
   const startEditingMessage = (message) => {
     if (message?.encryptedContent || Number(message?.protocolVersion || 1) >= 2) {
-      window.alert('Secure messages cannot be edited in place.');
+      showChatError('Secure message', 'Secure messages cannot be edited in place.');
       return;
     }
 
     setEditingMessage(message);
     setReplyTarget(null);
     setMessageInput(message.content || '');
+  };
+
+  const retryDecryptMessage = async (message) => {
+    if (!message?._id) {
+      return;
+    }
+
+    setMessages(prev => prev.map(entry => (
+      idsEqual(entry._id, message._id)
+        ? { ...entry, isDecrypting: true, decryptFailed: false }
+        : entry
+    )));
+
+    try {
+      const hydratedMessage = await cryptoService.hydratePrivateMessage(message);
+      setMessages(prev => prev.map(entry => {
+        if (!idsEqual(entry._id, message._id)) {
+          return entry;
+        }
+
+        if (hydratedMessage && !isEncryptedPlaceholder(hydratedMessage)) {
+          return { ...entry, ...hydratedMessage, isDecrypting: false, decryptFailed: false };
+        }
+
+        return { ...entry, isDecrypting: false, decryptFailed: true };
+      }));
+    } catch (error) {
+      console.error('Decrypt retry failed:', error);
+      setMessages(prev => prev.map(entry => (
+        idsEqual(entry._id, message._id)
+          ? { ...entry, isDecrypting: false, decryptFailed: true }
+          : entry
+      )));
+    }
   };
 
   const handleToggleReaction = async (message, emoji) => {
@@ -520,7 +769,7 @@ const ChatsPage = () => {
       }
     } catch (error) {
       console.error('Error updating reaction:', error);
-      window.alert(error.message || 'Failed to update the reaction.');
+      showChatError('Reaction not updated', error.message || 'Failed to update the reaction.');
     }
   };
 
@@ -537,7 +786,7 @@ const ChatsPage = () => {
       }
     } catch (error) {
       console.error('Error deleting message:', error);
-      window.alert(error.message || 'Failed to delete the message.');
+      showChatError('Message not deleted', error.message || 'Failed to delete the message.');
     }
   };
 
@@ -550,7 +799,7 @@ const ChatsPage = () => {
       }
     } catch (error) {
       console.error('Error updating pinned state:', error);
-      window.alert(error.message || 'Failed to update the pinned message.');
+      showChatError('Pinned message not updated', error.message || 'Failed to update the pinned message.');
     }
   };
 
@@ -562,7 +811,7 @@ const ChatsPage = () => {
 
   const startForwardingMessage = (message) => {
     if (!isForwardablePlaintextMessage(message)) {
-      window.alert('Only text messages can be forwarded right now.');
+      showChatError('Cannot forward message', 'Only text messages can be forwarded right now.');
       return;
     }
 
@@ -640,10 +889,13 @@ const ChatsPage = () => {
   };
 
   const handleStartCall = (callType) => {
-    if (!selectedChat) return;
+    if (!selectedChat?._id) {
+      setCallStatus('Send a message before starting a call.');
+      scheduleUiTimeout(() => setCallStatus(null), 3000);
+      return;
+    }
     setCallStatus(`Calling ${callType === 'video' ? 'video' : 'audio'}...`);
-    // Clear after 4s
-    setTimeout(() => setCallStatus(null), 4000);
+    scheduleUiTimeout(() => setCallStatus(null), 4000);
     socketService.emit('start_call_request', {
       chatId: selectedChat._id,
       callType
@@ -653,7 +905,7 @@ const ChatsPage = () => {
   const handleCallRequestSent = ({ chatId, callType }) => {
     if (!selectedChat || !idsEqual(chatId, selectedChat._id)) return;
     setCallStatus(`${callType === 'video' ? 'Video' : 'Audio'} call request sent`);
-    setTimeout(() => setCallStatus(null), 3000);
+    scheduleUiTimeout(() => setCallStatus(null), 3000);
   };
 
   const handleIncomingCall = ({ chatId, callType, from }) => {
@@ -661,17 +913,21 @@ const ChatsPage = () => {
     if (chatId && currentChatId && !idsEqual(chatId, currentChatId)) return;
     const callerName = from?.username || 'Contact';
     setCallStatus(`Incoming ${callType === 'video' ? 'video' : 'audio'} call from ${callerName}`);
-    // Lightweight alert for now; real UI can be added later
-    window?.alert?.(`Incoming ${callType} call from ${callerName}`);
-    setTimeout(() => setCallStatus(null), 5000);
+    toast({
+      title: 'Incoming call',
+      description: `Incoming ${callType} call from ${callerName}`
+    });
+    scheduleUiTimeout(() => setCallStatus(null), 5000);
   };
 
-  const uploadAndSendFile = async (file) => {
+  const uploadAndSendFile = async (file, options = {}) => {
+    const { messageType = null } = options;
     if (!file || !selectedChat) return;
     const tempId = `temp-file-${Date.now()}`;
 
     try {
-      const recipient = getOtherParticipant(selectedChat) || selectedUser;
+      const activeChat = await ensurePersistedChat(selectedChat);
+      const recipient = getOtherParticipant(activeChat) || selectedUser;
       if (!recipient?._id) {
         throw new Error('Recipient encryption key is unavailable');
       }
@@ -683,14 +939,14 @@ const ChatsPage = () => {
       const optimisticMessage = {
         _id: tempId,
         tempId,
-        chatId: selectedChat._id,
+        chatId: activeChat._id,
         sender: {
           _id: user?._id || user?.id,
           username: user?.username,
           avatar: user?.avatar
         },
         content: encryptedAttachment.attachmentMetadata?.originalName || file.name,
-        messageType: encryptedAttachment.attachmentMetadata?.category === 'image' ? 'image' : 'file',
+        messageType: messageType || (encryptedAttachment.attachmentMetadata?.category === 'image' ? 'image' : encryptedAttachment.attachmentMetadata?.category === 'audio' ? 'audio' : 'file'),
         fileMetadata: {
           originalName: 'Encrypted attachment',
           mimetype: file.type,
@@ -713,7 +969,7 @@ const ChatsPage = () => {
       setChats((prev) => {
         const updated = prev.map((chat) => {
           const chatId = chat._id?.toString() || chat._id;
-          if (idsEqual(chatId, selectedChat._id)) {
+          if (idsEqual(chatId, activeChat._id)) {
             return {
               ...chat,
               lastMessage: optimisticMessage,
@@ -726,11 +982,12 @@ const ChatsPage = () => {
         return updated.sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
       });
 
-      const response = await api.uploadChatFile(selectedChat._id, encryptedAttachment.encryptedFile, {
+      const response = await api.uploadChatFile(activeChat._id, encryptedAttachment.encryptedFile, {
         tempId,
         encryptedFilePayload: encryptedAttachment.encryptionPayload,
         expiresInSeconds: disappearingTimer,
-        isViewOnce: viewOnceNextFile
+        isViewOnce: viewOnceNextFile,
+        messageType: messageType || undefined
       });
 
       const savedMessage = await cryptoService.hydratePrivateMessage(response?.data || response);
@@ -756,13 +1013,14 @@ const ChatsPage = () => {
       setChats(prev => {
         const updated = prev.map(chat => {
           const chatId = chat._id?.toString() || chat._id;
-          if (idsEqual(chatId, selectedChat._id)) {
+          if (idsEqual(chatId, activeChat._id)) {
             return { ...chat, lastMessage: savedMessage, updatedAt: new Date() };
           }
           return chat;
         });
         return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
       });
+      fetchChats();
 
       if (viewOnceNextFile) {
         setViewOnceNextFile(false);
@@ -778,7 +1036,7 @@ const ChatsPage = () => {
             }
           : message
       )));
-      window.alert(error.message || 'Failed to send encrypted attachment.');
+      showChatError('Attachment not sent', error.message || 'Failed to send encrypted attachment.');
     }
   };
 
@@ -790,10 +1048,79 @@ const ChatsPage = () => {
     }
   };
 
+  const stopVoiceTracks = () => {
+    voiceStreamRef.current?.getTracks?.().forEach((track) => track.stop());
+    voiceStreamRef.current = null;
+  };
+
+  const startVoiceRecording = async () => {
+    if (encryptionBlocked || isRecordingVoice) {
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      showChatError('Voice unavailable', 'Voice recording is not supported in this browser.');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+      const recorder = new MediaRecorder(stream, { mimeType });
+      voiceChunksRef.current = [];
+      voiceStreamRef.current = stream;
+      voiceRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size > 0) {
+          voiceChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const durationMs = voiceStartedAtRef.current ? Date.now() - voiceStartedAtRef.current : 0;
+        const chunks = voiceChunksRef.current;
+        voiceChunksRef.current = [];
+        voiceStartedAtRef.current = null;
+        setIsRecordingVoice(false);
+        setVoiceStartedAt(null);
+        stopVoiceTracks();
+
+        if (!chunks.length || durationMs < 500) {
+          return;
+        }
+
+        const blob = new Blob(chunks, { type: mimeType });
+        const file = new File([blob], `voice-${Date.now()}.webm`, { type: 'audio/webm' });
+        await uploadAndSendFile(file, { messageType: 'audio' });
+      };
+
+      recorder.start();
+      voiceStartedAtRef.current = Date.now();
+      setVoiceStartedAt(Date.now());
+      setIsRecordingVoice(true);
+    } catch (error) {
+      stopVoiceTracks();
+      voiceStartedAtRef.current = null;
+      setIsRecordingVoice(false);
+      setVoiceStartedAt(null);
+      showChatError('Microphone unavailable', error.message || 'Microphone access failed.');
+    }
+  };
+
+  const stopVoiceRecording = () => {
+    const recorder = voiceRecorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+  };
+
   const handleTyping = (e) => {
     setMessageInput(e.target.value);
 
-    if (!selectedChat || editingMessage) return;
+    if (!selectedChat?._id || editingMessage) return;
 
     // Send typing indicator
     if (!isTyping) {
@@ -815,7 +1142,7 @@ const ChatsPage = () => {
 
   const fetchUsers = async (search = '') => {
     try {
-      const response = await api.get(`/users?search=${search}`);
+      const response = await api.get(`/users?search=${encodeURIComponent(search.trim())}`);
       setUsers(response || []);
     } catch (error) {
       console.error('Error fetching users:', error);
@@ -830,28 +1157,22 @@ const ChatsPage = () => {
       const recipientUser = typeof recipientIdOrUser === 'object' 
         ? recipientIdOrUser 
         : null;
+
+      if (!recipientId) {
+        throw new Error('Select a valid user to start a chat.');
+      }
       
       if (recipientUser) {
         setSelectedUser(recipientUser);
       }
-      
-      const response = await api.post('/chats', { recipientId });
-      const chat = response;
-      
-      let otherUser = recipientUser; 
 
-      if (!otherUser && chat?.participants && Array.isArray(chat.participants)) {
-        const currentUserId = normalizeId(user?._id || user?.id);
-        otherUser = chat.participants.find(p => {
-          return !idsEqual(p, currentUserId) && typeof p === 'object' && p.username;
-        });
-      }
+      let otherUser = recipientUser;
       if (!otherUser?.username) {
         try {
           const userResponse = await api.get(`/users/${recipientId}`);
-          const recipientUser = userResponse;
-          if (recipientUser) {
-            otherUser = recipientUser;
+          const fetchedUser = userResponse;
+          if (fetchedUser) {
+            otherUser = fetchedUser;
           }
         } catch (err) {
           console.error('Error fetching recipient details:', err);
@@ -861,11 +1182,31 @@ const ChatsPage = () => {
       if (otherUser) {
         setSelectedUser(otherUser);
       }
-      
-      setSelectedChat(chat);
+
+      setSelectedChat({
+        _id: null,
+        isDraft: true,
+        participants: [
+          {
+            _id: user?._id || user?.id,
+            username: user?.username,
+            avatar: user?.avatar,
+            status: user?.status
+          },
+          otherUser || { _id: recipientId }
+        ],
+        lastMessage: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      setMessages([]);
+      setPinnedMessages([]);
+      setReplyTarget(null);
+      setEditingMessage(null);
+      setMessageInput('');
+      setMessageSearchQuery('');
       setShowUserList(false);
       setShowProfile(false);
-      fetchChats();
     } catch (error) {
       console.error('Error starting chat:', error);
     }
@@ -890,7 +1231,7 @@ const ChatsPage = () => {
         }
       } else if (typeof p === 'string') {
         if (p !== currentUserId) {
-          return null;
+          return { _id: p };
         }
       }
     }
@@ -914,7 +1255,26 @@ const ChatsPage = () => {
     setReplyTarget(null);
     setEditingMessage(null);
     setMessageInput('');
+    setMessageSearchQuery('');
     setSelectedChat(chat);
+  };
+
+  const handleToggleArchiveChat = async (chat, archived) => {
+    if (!chat?._id) {
+      return;
+    }
+
+    try {
+      await api.patch(`/chats/${chat._id}/archive`, { archived });
+      setChats(prev => prev.filter((entry) => !idsEqual(entry._id, chat._id)));
+      if (idsEqual(selectedChat?._id, chat._id)) {
+        setSelectedChat(null);
+        setMessages([]);
+      }
+    } catch (error) {
+      console.error('Error updating chat archive state:', error);
+      showChatError('Archive not updated', error.message || 'Failed to update chat archive state.');
+    }
   };
 
   const formatTime = (date) => {
@@ -931,8 +1291,13 @@ const ChatsPage = () => {
     }
   };
 
-  const encryptionBlocked = encryptionState?.status !== 'ready';
   const activeTimerOption = getDisappearingTimerOption(disappearingTimer);
+  const normalizedMessageSearchQuery = messageSearchQuery.trim().toLowerCase();
+  const visibleMessages = normalizedMessageSearchQuery
+    ? (messages || []).filter((message) => (
+      getMessageTextContent(message).toLowerCase().includes(normalizedMessageSearchQuery)
+    ))
+    : (messages || []);
   const cycleDisappearingTimer = () => {
     setDisappearingTimer((currentValue) => getNextDisappearingTimer(currentValue));
   };
@@ -963,7 +1328,7 @@ const ChatsPage = () => {
   };
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col bg-void overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col bg-[#070a0f] overflow-hidden">
       {/* ── Mode Tabs: Premium Segmented Control ── */}
       <div className="flex items-center justify-center gap-1 border-b border-bd-subtle bg-panel/30 px-4 py-3 backdrop-blur-xl shrink-0">
         {[
@@ -1003,7 +1368,7 @@ const ChatsPage = () => {
         ) : activeMode === 'channels' ? (
           <ChannelsPage />
         ) : (
-    <div className="flex h-full bg-void overflow-hidden">
+    <div className="flex h-full min-h-0 bg-[#070a0f] overflow-hidden">
       {/* ── Chat List Sidebar: Premium Glass ── */}
       <div className={`w-full md:w-80 lg:w-96 flex flex-col flex-shrink-0 ${selectedChat ? 'hidden md:flex' : 'flex'} bg-panel/20 border-r border-bd-subtle`} style={{ backdropFilter: 'var(--glass-blur)' }}>
         {/* Search Header */}
@@ -1029,6 +1394,18 @@ const ChatsPage = () => {
               <Plus className="w-4 h-4 text-accent" />
             </div>
             <span className="font-ui font-semibold text-accent text-sm tracking-wide">New Chat</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setShowArchived((value) => !value);
+              setSelectedChat(null);
+              setMessages([]);
+            }}
+            className="mt-2 w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-2xl border border-white/[0.06] bg-white/[0.03] text-sm font-ui font-semibold text-tx-secondary transition-all duration-base hover:bg-white/[0.06] hover:text-tx-primary"
+          >
+            {showArchived ? <Inbox className="h-4 w-4" /> : <Archive className="h-4 w-4" />}
+            <span>{showArchived ? 'Inbox' : 'Archived'}</span>
           </button>
         </div>
 
@@ -1226,12 +1603,12 @@ const ChatsPage = () => {
 
       {/* Chat Area */}
       {selectedChat ? (
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative chat-bg-animated">
+        <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative bg-[#070a0f]">
           {/* ── Chat Header: Premium Glass ── */}
           {(() => {
             const chatPartner = getOtherParticipant(selectedChat) || selectedUser;
             return (
-              <div className="absolute top-0 left-0 right-0 z-20 h-16 px-4 flex items-center justify-between border-b border-white/[0.08] bg-[#111118]">
+              <div className="shrink-0 h-16 px-4 flex items-center justify-between border-b border-white/[0.08] bg-[#111118]">
                 <div className="flex items-center gap-3">
                   <button
                     onClick={() => setSelectedChat(null)}
@@ -1269,10 +1646,19 @@ const ChatsPage = () => {
                   </div>
                 </div>
                 <div className="flex items-center gap-0.5">
-                  <button type="button" onClick={() => handleStartCall('audio')} className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary" title="Audio call">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleArchiveChat(selectedChat, !showArchived)}
+                    disabled={!selectedChat?._id}
+                    className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary disabled:opacity-40 disabled:cursor-not-allowed"
+                    title={!selectedChat?._id ? 'Send a message before archiving' : showArchived ? 'Move to inbox' : 'Archive chat'}
+                  >
+                    {showArchived ? <Inbox className="w-5 h-5" strokeWidth={1.5} /> : <Archive className="w-5 h-5" strokeWidth={1.5} />}
+                  </button>
+                  <button type="button" onClick={() => handleStartCall('audio')} disabled={!selectedChat?._id} className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary disabled:opacity-40 disabled:cursor-not-allowed" title={!selectedChat?._id ? 'Send a message before calling' : 'Audio call'}>
                     <Phone className="w-5 h-5" strokeWidth={1.5} />
                   </button>
-                  <button type="button" onClick={() => handleStartCall('video')} className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary" title="Video call">
+                  <button type="button" onClick={() => handleStartCall('video')} disabled={!selectedChat?._id} className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary disabled:opacity-40 disabled:cursor-not-allowed" title={!selectedChat?._id ? 'Send a message before calling' : 'Video call'}>
                     <Video className="w-5 h-5" strokeWidth={1.5} />
                   </button>
                 </div>
@@ -1281,7 +1667,7 @@ const ChatsPage = () => {
           })()}
 
           {/* ── Messages Area ── */}
-          <div className="relative z-10 flex-1 overflow-y-auto p-4 md:p-6 pt-20 space-y-3 custom-scrollbar">
+          <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 space-y-3">
             {callStatus && (
               <div className="flex justify-center">
                 <div className="px-4 py-2 mb-3 rounded-full bg-white/10 text-white text-sm shadow-lg backdrop-blur-xl border border-white/10">
@@ -1305,6 +1691,18 @@ const ChatsPage = () => {
                 </div>
               </div>
             )}
+            <div className="mx-auto mb-4 w-full max-w-3xl">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-tx-muted" />
+                <input
+                  type="search"
+                  value={messageSearchQuery}
+                  onChange={(event) => setMessageSearchQuery(event.target.value)}
+                  placeholder="Search loaded messages"
+                  className="w-full rounded-2xl border border-white/[0.06] bg-white/[0.03] py-2.5 pl-10 pr-4 text-sm text-tx-primary placeholder-tx-muted outline-none transition-all focus:border-accent/20 focus:bg-white/[0.05]"
+                />
+              </div>
+            </div>
             {pinnedMessages.length > 0 && (
               <div className="mx-auto mb-4 w-full max-w-3xl rounded-2xl border border-accent/15 bg-accent/[0.05] px-4 py-3">
                 <div className="flex items-center gap-2 text-xs font-ui font-semibold uppercase tracking-[0.22em] text-accent/70">
@@ -1325,21 +1723,42 @@ const ChatsPage = () => {
                 </div>
               </div>
             )}
-            {(messages || []).map((message, index) => {
+            {visibleMessages.length === 0 && normalizedMessageSearchQuery && (
+              <div className="flex justify-center py-8 text-sm text-tx-muted">
+                No loaded messages match this search.
+              </div>
+            )}
+            {visibleMessages.map((message, index) => {
               const senderId = normalizeId(message?.sender);
-              const currentUserId = normalizeId(user?._id || user?.id);
+              if (!currentUserId) {
+                return (
+                  <div key={`messages-auth-loading-${index}`} className="flex justify-center py-6">
+                    <div className="h-6 w-6 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+                  </div>
+                );
+              }
+
+              const previousMessage = index > 0 ? visibleMessages[index - 1] : null;
+              const showDateSeparator = shouldShowDateSeparator(message, previousMessage);
               const isOwn = idsEqual(senderId, currentUserId);
               const reactionSummary = getReactionSummary(message.reactions);
               const showAvatar = !isOwn && (
-                index === messages.length - 1 ||
-                !idsEqual(messages[index + 1]?.sender, message?.sender)
+                index === visibleMessages.length - 1 ||
+                !idsEqual(visibleMessages[index + 1]?.sender, message?.sender)
               );
 
               return (
-                <div
-                  key={message._id}
-                  className={`flex ${isOwn ? 'justify-end' : 'justify-start'} items-end space-x-2`}
-                >
+                <Fragment key={message._id}>
+                  {showDateSeparator && (
+                    <div className="flex justify-center py-3">
+                      <span className="rounded-full border border-white/[0.06] bg-white/[0.04] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-tx-muted">
+                        {formatDateSeparator(message.createdAt)}
+                      </span>
+                    </div>
+                  )}
+                  <div
+                    className={`flex ${isOwn ? 'justify-end' : 'justify-start'} items-end space-x-2`}
+                  >
                   {!isOwn && (
                     <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden ${!showAvatar ? 'opacity-0' : ''}`} style={{background: 'linear-gradient(135deg, rgba(0,240,255,0.20) 0%, rgba(0,255,102,0.10) 100%)', border: '1px solid rgba(255,255,255,0.06)'}}>
                       {showAvatar && (
@@ -1395,6 +1814,32 @@ const ChatsPage = () => {
                         isOwn={isOwn}
                         onDownload={handleDownloadAttachment}
                       />
+                    ) : message.isSending ? (
+                      <div className="flex items-center gap-2 py-1 text-xs text-tx-muted">
+                        <div className="h-4 w-4 animate-spin rounded-full border-2 border-accent/30 border-t-accent" />
+                        <span>Sending...</span>
+                      </div>
+                    ) : message.sendFailed ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200">
+                        <AlertCircle className="h-4 w-4 shrink-0" />
+                        <span>{message.errorMessage || 'Failed to send.'}</span>
+                      </div>
+                    ) : isEncryptedPlaceholder(message) ? (
+                      <div className="flex items-center gap-2 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                        <Lock className="h-4 w-4 shrink-0" />
+                        <span>
+                          {message.isDecrypting ? 'Retrying decryption...' : message.decryptFailed ? 'Still encrypted on this device.' : 'Encrypted message unavailable.'}
+                          {!message.isDecrypting && (
+                            <button
+                              type="button"
+                              onClick={() => retryDecryptMessage(message)}
+                              className="ml-1 underline transition-colors hover:text-white"
+                            >
+                              Retry
+                            </button>
+                          )}
+                        </span>
+                      </div>
                     ) : (
                       <p className="break-words">{message.content}</p>
                     )}
@@ -1511,14 +1956,15 @@ const ChatsPage = () => {
                       )}
                     </div>
                   </div>
-                </div>
+                  </div>
+                </Fragment>
               );
             })}
             <div ref={messagesEndRef} />
           </div>
 
           {/* ── Message Composer: Premium Floating Bar ── */}
-          <div className="relative z-10 p-3 md:p-4 bg-void/80 backdrop-blur-xl border-t border-bd-subtle">
+          <div className="shrink-0 p-3 md:p-4 bg-[#0c1118]/95 backdrop-blur-xl border-t border-white/[0.08]">
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <button type="button" onClick={cycleDisappearingTimer} className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.06] bg-white/[0.03] px-2.5 py-1 text-[11px] font-ui font-semibold text-tx-secondary transition-all hover:bg-white/[0.06] hover:border-accent/20" title="Cycle disappearing timer">
                 <Zap className="w-3 h-3 text-accent" />
@@ -1549,8 +1995,29 @@ const ChatsPage = () => {
               <button type="button" onClick={() => fileInputRef.current?.click()} disabled={encryptionBlocked} className="p-2.5 bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.06] hover:border-accent/20 rounded-xl transition-all focus:outline-none" title="Send file, image or video">
                 <Paperclip className="w-5 h-5 text-tx-secondary" strokeWidth={1.5} />
               </button>
-              <button type="button" onClick={() => audioInputRef.current?.click()} disabled={encryptionBlocked} className="p-2.5 bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.06] hover:border-accent/20 rounded-xl transition-all focus:outline-none" title="Send audio">
-                <Mic className="w-5 h-5 text-tx-secondary" strokeWidth={1.5} />
+              <button
+                type="button"
+                onMouseDown={startVoiceRecording}
+                onMouseUp={stopVoiceRecording}
+                onMouseLeave={stopVoiceRecording}
+                onTouchStart={(event) => {
+                  event.preventDefault();
+                  void startVoiceRecording();
+                }}
+                onTouchEnd={(event) => {
+                  event.preventDefault();
+                  stopVoiceRecording();
+                }}
+                onDoubleClick={() => audioInputRef.current?.click()}
+                disabled={encryptionBlocked}
+                className={`p-2.5 border rounded-xl transition-all focus:outline-none ${
+                  isRecordingVoice
+                    ? 'border-red-400/30 bg-red-400/15 text-red-200'
+                    : 'border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.06] hover:border-accent/20'
+                }`}
+                title={isRecordingVoice ? 'Release to send voice message' : 'Hold to record, double-click to choose audio file'}
+              >
+                <Mic className={`w-5 h-5 ${isRecordingVoice ? 'text-red-200' : 'text-tx-secondary'}`} strokeWidth={1.5} />
               </button>
               <div className="flex-1 relative">
                 <input type="text" value={messageInput} onChange={handleTyping} disabled={encryptionBlocked} placeholder={ encryptionBlocked ? 'Import your key backup to send encrypted messages' : editingMessage ? 'Edit your message' : replyTarget ? 'Write your reply' : 'Type a message...' } className="w-full px-4 py-3 bg-white/[0.03] border border-white/[0.06] rounded-2xl text-tx-primary placeholder-tx-muted focus:outline-none focus:border-accent/20 focus:bg-white/[0.05] transition-all text-sm" />
@@ -1562,6 +2029,12 @@ const ChatsPage = () => {
                 <Send className="w-5 h-5" strokeWidth={2} />
               </button>
             </form>
+            {isRecordingVoice && (
+              <div className="mt-2 flex items-center gap-2 rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-100">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-red-300" />
+                <span>Recording voice message. Release to send.</span>
+              </div>
+            )}
           </div>
         </div>
       ) : (

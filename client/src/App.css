@@ -454,8 +454,8 @@
   }
 }
 
-/* Added floating animation keyframes */
-@keyframes float {
+/* Gentle rotation for effects that should wobble instead of vertically floating. */
+@keyframes gentle-wobble {
   0%,
   100% {
     transform: rotate(0deg);

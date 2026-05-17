@@ -76,6 +76,21 @@ export default function Settings() {
   const [fontSize, setFontSize] = useState(16);
   const fileInputRef = useRef(null);
   const backupFileInputRef = useRef(null);
+  const timeoutRefs = useRef(new Set());
+
+  const scheduleTimeout = useCallback((callback, delay) => {
+    const timeoutId = window.setTimeout(() => {
+      timeoutRefs.current.delete(timeoutId);
+      callback();
+    }, delay);
+    timeoutRefs.current.add(timeoutId);
+    return timeoutId;
+  }, []);
+
+  useEffect(() => () => {
+    timeoutRefs.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    timeoutRefs.current.clear();
+  }, []);
 
   // Privacy & Security States
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
@@ -91,6 +106,9 @@ export default function Settings() {
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [showSessionsExpanded, setShowSessionsExpanded] = useState(false);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [authSessions, setAuthSessions] = useState([]);
+  const [authSessionsLoading, setAuthSessionsLoading] = useState(false);
+  const [accountActionLoading, setAccountActionLoading] = useState('');
   const [passwordData, setPasswordData] = useState({
     currentPassword: '',
     newPassword: '',
@@ -148,7 +166,6 @@ export default function Settings() {
     }
   }, [user]);
 
-  // Device refresh should follow auth state, not callback identity churn from the context tree.
   useEffect(() => {
     if (!user) {
       return;
@@ -165,8 +182,40 @@ export default function Settings() {
       }
     };
 
-    loadDevices();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    void loadDevices();
+  }, [user]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!user) {
+      setAuthSessions([]);
+      return undefined;
+    }
+
+    const loadAuthSessions = async () => {
+      try {
+        setAuthSessionsLoading(true);
+        const response = await apiService.getAuthSessions();
+        if (!cancelled) {
+          setAuthSessions(Array.isArray(response.sessions) ? response.sessions : []);
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError.message || 'Failed to load active login sessions.');
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthSessionsLoading(false);
+        }
+      }
+    };
+
+    loadAuthSessions();
+
+    return () => {
+      cancelled = true;
+    };
   }, [user]);
 
   useEffect(() => {
@@ -311,12 +360,13 @@ export default function Settings() {
           setAvatarUrl(reader.result);
           setShowAvatarModal(false);
           setSuccess('Avatar uploaded successfully!');
-          setTimeout(() => setSuccess(''), 3000);
+          scheduleTimeout(() => setSuccess(''), 3000);
         };
         reader.readAsDataURL(file);
-      } catch {
+      } catch (uploadError) {
+        console.error('Failed to upload avatar preview:', uploadError);
         setError('Failed to upload avatar');
-        setTimeout(() => setError(''), 3000);
+        scheduleTimeout(() => setError(''), 3000);
       }
     }
   };
@@ -325,14 +375,14 @@ export default function Settings() {
     setAvatarUrl(url);
     setShowAvatarModal(false);
     setSuccess('Avatar selected successfully!');
-    setTimeout(() => setSuccess(''), 3000);
+    scheduleTimeout(() => setSuccess(''), 3000);
   };
 
   const handleRemoveAvatar = () => {
     setAvatarUrl('');
     setShowAvatarModal(false);
     setSuccess('Avatar removed successfully!');
-    setTimeout(() => setSuccess(''), 3000);
+    scheduleTimeout(() => setSuccess(''), 3000);
   };
 
   const handleSaveProfile = async () => {
@@ -429,7 +479,7 @@ export default function Settings() {
         setError('Browser notifications are blocked for this site.');
       } else {
         setSuccess(resolvedStatus.enabled ? 'Push notifications enabled.' : 'Push notifications disabled.');
-        setTimeout(() => setSuccess(''), 3000);
+        scheduleTimeout(() => setSuccess(''), 3000);
       }
     } catch (toggleError) {
       setError(toggleError.message || 'Failed to update push notifications.');
@@ -477,7 +527,8 @@ export default function Settings() {
   const handleEnableTwoFactor = async () => {
     if (twoFactorBackupCodes.length > 0) {
       closeTwoFactorModal();
-      setTimeout(() => setSuccess(''), 3000);
+      setSuccess('Two-Factor Authentication is now active.');
+      scheduleTimeout(() => setSuccess(''), 3000);
       return;
     }
 
@@ -518,7 +569,7 @@ export default function Settings() {
       setTwoFactorEnabled(false);
       closeTwoFactorModal();
       setSuccess('Two-Factor Authentication disabled.');
-      setTimeout(() => setSuccess(''), 3000);
+      scheduleTimeout(() => setSuccess(''), 3000);
     } catch (twoFactorError) {
       setError(twoFactorError.message || 'Failed to disable Two-Factor Authentication.');
     } finally {
@@ -534,7 +585,7 @@ export default function Settings() {
     try {
       await navigator.clipboard.writeText(twoFactorBackupCodes.join('\n'));
       setSuccess('Backup codes copied.');
-      setTimeout(() => setSuccess(''), 3000);
+      scheduleTimeout(() => setSuccess(''), 3000);
     } catch (copyError) {
       setError(copyError.message || 'Failed to copy backup codes.');
     }
@@ -564,7 +615,7 @@ export default function Settings() {
       setSuccess('Password changed successfully!');
       setShowPasswordModal(false);
       setPasswordData({ currentPassword: '', newPassword: '', confirmPassword: '' });
-      setTimeout(() => setSuccess(''), 3000);
+      scheduleTimeout(() => setSuccess(''), 3000);
     } catch (err) {
       setError(err.message || 'Failed to change password');
     }
@@ -586,7 +637,7 @@ export default function Settings() {
     try {
       await renameDevice(sessionId, trimmedName);
       setSuccess('Device name updated.');
-      setTimeout(() => setSuccess(''), 3000);
+      scheduleTimeout(() => setSuccess(''), 3000);
     } catch (renameError) {
       setError(renameError.message || 'Failed to rename device.');
     }
@@ -596,9 +647,94 @@ export default function Settings() {
     try {
       await revokeDevice(sessionId);
       setSuccess('Linked device revoked successfully.');
-      setTimeout(() => setSuccess(''), 3000);
+      scheduleTimeout(() => setSuccess(''), 3000);
     } catch (revokeError) {
       setError(revokeError.message || 'Failed to revoke linked device.');
+    }
+  };
+
+  const refreshAuthSessions = async () => {
+    setAuthSessionsLoading(true);
+    try {
+      const response = await apiService.getAuthSessions();
+      setAuthSessions(Array.isArray(response.sessions) ? response.sessions : []);
+    } catch (loadError) {
+      setError(loadError.message || 'Failed to load active login sessions.');
+    } finally {
+      setAuthSessionsLoading(false);
+    }
+  };
+
+  const handleRevokeAuthSession = async (sessionId) => {
+    if (!window.confirm('Revoke this login session? That browser or device will need to sign in again.')) {
+      return;
+    }
+
+    setAccountActionLoading(`session:${sessionId}`);
+    setError('');
+    setSuccess('');
+
+    try {
+      await apiService.revokeAuthSession(sessionId);
+      await refreshAuthSessions();
+      setSuccess('Login session revoked.');
+      scheduleTimeout(() => setSuccess(''), 3000);
+    } catch (revokeError) {
+      setError(revokeError.message || 'Failed to revoke login session.');
+    } finally {
+      setAccountActionLoading('');
+    }
+  };
+
+  const handleDownloadAccountExport = async () => {
+    setAccountActionLoading('export');
+    setError('');
+    setSuccess('');
+
+    try {
+      const exportData = await apiService.exportAccountData();
+      const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+        type: 'application/json'
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `vaaniarc-account-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setSuccess('Account data export prepared.');
+      scheduleTimeout(() => setSuccess(''), 3000);
+    } catch (exportError) {
+      setError(exportError.message || 'Failed to export account data.');
+    } finally {
+      setAccountActionLoading('');
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!window.confirm('Delete your VaaniArc account permanently? This cannot be undone.')) {
+      return;
+    }
+
+    const password = window.prompt('Enter your password to permanently delete this account.');
+    if (password === null) {
+      return;
+    }
+
+    setAccountActionLoading('delete');
+    setError('');
+    setSuccess('');
+
+    try {
+      await apiService.deleteAccount(password);
+      await logout();
+      navigate('/auth', { replace: true });
+    } catch (deleteError) {
+      setError(deleteError.message || 'Failed to delete account.');
+    } finally {
+      setAccountActionLoading('');
     }
   };
 
@@ -611,8 +747,9 @@ export default function Settings() {
     try {
       await navigator.clipboard.writeText(encryptionState.fingerprint);
       setSuccess('Device fingerprint copied.');
-      setTimeout(() => setSuccess(''), 3000);
-    } catch {
+      scheduleTimeout(() => setSuccess(''), 3000);
+    } catch (copyError) {
+      console.error('Failed to copy device fingerprint:', copyError);
       setError('Failed to copy the device fingerprint.');
     }
   };
@@ -627,7 +764,7 @@ export default function Settings() {
     try {
       await downloadEncryptionBackup(passphrase);
       setSuccess('Encrypted key backup downloaded. Keep the file and passphrase safe.');
-      setTimeout(() => setSuccess(''), 4000);
+      scheduleTimeout(() => setSuccess(''), 4000);
     } catch (backupError) {
       setError(backupError.message || 'Failed to export the encryption backup.');
     }
@@ -651,7 +788,7 @@ export default function Settings() {
       const backupContent = await file.text();
       await restoreEncryptionBackup(backupContent, passphrase);
       setSuccess('Encryption backup restored on this device.');
-      setTimeout(() => setSuccess(''), 4000);
+      scheduleTimeout(() => setSuccess(''), 4000);
     } catch (restoreError) {
       setError(restoreError.message || 'Failed to restore the encryption backup.');
     }
@@ -868,6 +1005,28 @@ export default function Settings() {
 
   const renderPrivacySection = () => (
     <div className="space-y-6">
+      {error && (
+        <div className="bg-red-500/10 backdrop-blur-xl border border-red-500/20 rounded-2xl p-4 flex items-center justify-between">
+          <p className="text-red-400 text-sm font-bold">{error}</p>
+          <button onClick={() => setError('')} className="text-red-400 hover:text-red-300">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {success && (
+        <div className="bg-green-500/10 backdrop-blur-xl border border-green-500/20 rounded-2xl p-4 flex items-center justify-between">
+          <p className="text-green-400 text-sm font-bold">{success}</p>
+          <button onClick={() => setSuccess('')} className="text-green-400 hover:text-green-300">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+
       <div className="bg-slate-900/10 backdrop-blur-[40px] rounded-3xl p-8 border border-white/10 shadow-2xl">
         <h3 className="text-2xl font-bold text-white mb-8 flex items-center gap-4">
           <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
@@ -1148,6 +1307,111 @@ export default function Settings() {
                   </div>
                 ))}
               </div>
+            </div>
+          </div>
+
+          {/* Account Controls */}
+          <div className="rounded-2xl bg-slate-500/5 backdrop-blur-xl border border-white/10 overflow-hidden">
+            <div className="p-6 border-b border-white/5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-start gap-5">
+                  <div className="w-14 h-14 rounded-2xl bg-slate-500/10 backdrop-blur-sm flex items-center justify-center">
+                    <svg className="w-7 h-7 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 11c0 1.657-2.239 3-5 3S2 12.657 2 11s2.239-3 5-3 5 1.343 5 3zm0 0c0 1.657 2.239 3 5 3s5-1.343 5-3-2.239-3-5-3-5 1.343-5 3zm0 0v6m-5-3v4m10-4v4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div className="text-lg font-bold text-white mb-1">Account Data</div>
+                    <div className="text-sm text-slate-400 font-medium">
+                      Export your data, review login sessions, or permanently delete your account.
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleDownloadAccountExport()}
+                    disabled={accountActionLoading === 'export'}
+                    className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60 text-sm font-bold text-white transition-colors"
+                  >
+                    {accountActionLoading === 'export' ? 'Exporting...' : 'Export Data'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteAccount()}
+                    disabled={accountActionLoading === 'delete'}
+                    className="px-4 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60 text-sm font-bold text-red-300 border border-red-500/20 transition-colors"
+                  >
+                    {accountActionLoading === 'delete' ? 'Deleting...' : 'Delete Account'}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-bold text-white">Active Login Sessions</div>
+                  <div className="text-xs text-slate-400">
+                    {authSessionsLoading ? 'Checking active sessions...' : `${authSessions.length} active session${authSessions.length === 1 ? '' : 's'}`}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void refreshAuthSessions()}
+                  disabled={authSessionsLoading}
+                  className="px-3 py-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60 text-xs font-bold text-slate-200 transition-colors"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {authSessionsLoading && (
+                <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-5 text-sm font-medium text-slate-400">
+                  Loading login sessions...
+                </div>
+              )}
+
+              {!authSessionsLoading && authSessions.length === 0 && (
+                <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-5 text-sm font-medium text-slate-400">
+                  No active login sessions were found.
+                </div>
+              )}
+
+              {!authSessionsLoading && authSessions.map((session) => (
+                <div key={session.id} className="rounded-xl border border-white/5 bg-black/20 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <div className="truncate text-sm font-bold text-white">
+                          {session.userAgent || 'Unknown browser'}
+                        </div>
+                        {session.current && (
+                          <span className="shrink-0 rounded-full border border-emerald-500/30 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300">
+                            Current
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 text-xs text-slate-400">
+                        {session.ipAddress || 'Unknown network'} - Last seen {formatLastActive(session.lastSeenAt)}
+                      </div>
+                      <div className="mt-0.5 text-xs text-slate-500">
+                        Expires {session.expiresAt ? new Date(session.expiresAt).toLocaleString() : 'later'}
+                      </div>
+                    </div>
+                    {!session.current && !session.revokedAt && (
+                      <button
+                        type="button"
+                        onClick={() => void handleRevokeAuthSession(session.id)}
+                        disabled={accountActionLoading === `session:${session.id}`}
+                        className="shrink-0 px-4 py-2 text-xs font-bold bg-red-500/10 hover:bg-red-500/20 disabled:opacity-60 disabled:cursor-not-allowed text-red-400 rounded-lg transition-all border border-red-500/20"
+                      >
+                        {accountActionLoading === `session:${session.id}` ? 'Revoking...' : 'Revoke'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         </div>
@@ -1610,7 +1874,7 @@ export default function Settings() {
                   min="12" 
                   max="20" 
                   value={fontSize}
-                  onChange={(e) => setFontSize(parseInt(e.target.value))}
+                  onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
                   className="relative w-full h-2 bg-transparent rounded-lg appearance-none cursor-pointer z-10"
                   style={{
                     background: 'transparent'

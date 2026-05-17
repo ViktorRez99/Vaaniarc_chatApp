@@ -7,10 +7,13 @@ import {
   Lock,
   MessageCircle,
   Paperclip,
+  Pencil,
   Pin,
   Plus,
   Search,
   Send,
+  Smile,
+  Trash2,
   Users,
   Zap
 } from 'lucide-react';
@@ -72,10 +75,14 @@ const RoomsPage = () => {
   const [viewOnceNextFile, setViewOnceNextFile] = useState(false);
   const [pinnedMessages, setPinnedMessages] = useState([]);
   const [forwardingMessage, setForwardingMessage] = useState(null);
+  const [editingMessage, setEditingMessage] = useState(null);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const selectedRoomRef = useRef(null);
   const fileInputRef = useRef(null);
+  const socketHandlersRef = useRef({});
+  const socketListenerRefs = useRef(new Map());
+  const encryptionBlocked = encryptionState?.status !== 'ready';
 
   useEffect(() => {
     selectedRoomRef.current = selectedRoom;
@@ -91,9 +98,12 @@ const RoomsPage = () => {
 
     return () => {
       cleanupSocketListeners();
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = null;
+      }
       window.removeEventListener('vaaniarc:open-group-creator', openGroupCreator);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -105,10 +115,14 @@ const RoomsPage = () => {
       setMessages([]);
       setPinnedMessages([]);
       setTypingUsers(new Set());
+      setEditingMessage(null);
+      setMessageInput('');
       return undefined;
     }
 
     socketService.joinRoom(selectedRoom._id);
+    setEditingMessage(null);
+    setMessageInput('');
     void fetchRoomMessages(selectedRoom._id);
     void fetchPinnedRoomMessages(selectedRoom._id);
 
@@ -218,17 +232,28 @@ const RoomsPage = () => {
   };
 
   const setupSocketListeners = () => {
-    socketService.on('room_message', handleRoomMessage);
-    socketService.on('room_message_pin', handleRoomMessagePin);
-    socketService.on('user_typing_room', handleUserTypingRoom);
-    socketService.on('user_stop_typing_room', handleUserStopTypingRoom);
+    const listeners = [
+      ['room_message', 'handleRoomMessage'],
+      ['room_message_pin', 'handleRoomMessagePin'],
+      ['room_message_reaction', 'handleRoomMessagePin'],
+      ['room_message_edit', 'handleRoomMessagePin'],
+      ['room_message_delete', 'handleRoomMessagePin'],
+      ['user_typing_room', 'handleUserTypingRoom'],
+      ['user_stop_typing_room', 'handleUserStopTypingRoom']
+    ];
+
+    listeners.forEach(([eventName, handlerName]) => {
+      const listener = (payload) => socketHandlersRef.current[handlerName]?.(payload);
+      socketListenerRefs.current.set(eventName, listener);
+      socketService.on(eventName, listener);
+    });
   };
 
   const cleanupSocketListeners = () => {
-    socketService.off('room_message', handleRoomMessage);
-    socketService.off('room_message_pin', handleRoomMessagePin);
-    socketService.off('user_typing_room', handleUserTypingRoom);
-    socketService.off('user_stop_typing_room', handleUserStopTypingRoom);
+    socketListenerRefs.current.forEach((listener, eventName) => {
+      socketService.off(eventName, listener);
+    });
+    socketListenerRefs.current.clear();
   };
 
   const updateRoomMessageEverywhere = (nextMessage) => {
@@ -309,6 +334,15 @@ const RoomsPage = () => {
     });
   };
 
+  useEffect(() => {
+    socketHandlersRef.current = {
+      handleRoomMessage,
+      handleRoomMessagePin,
+      handleUserTypingRoom,
+      handleUserStopTypingRoom
+    };
+  });
+
   const getRoomMemberIds = (room) => [...new Set(
     (room?.members || [])
       .map((entry) => normalizeId(entry.user?._id || entry.user))
@@ -325,6 +359,28 @@ const RoomsPage = () => {
     event.preventDefault();
 
     if (!selectedRoom || !messageInput.trim()) {
+      return;
+    }
+
+    if (editingMessage?._id) {
+      try {
+        const response = await api.editRoomMessage(
+          selectedRoom._id,
+          editingMessage._id,
+          messageInput.trim(),
+          editingMessage.updatedAt
+        );
+        const updatedMessage = await cryptoService.hydrateRoomMessage(response?.message || response?.data?.message);
+        if (updatedMessage) {
+          updateRoomMessageEverywhere(updatedMessage);
+        }
+        setEditingMessage(null);
+        setMessageInput('');
+      } catch (editError) {
+        console.error('Error editing room message:', editError);
+        setError(editError.message || 'Failed to edit room message.');
+        setEditingMessage(null);
+      }
       return;
     }
 
@@ -455,6 +511,52 @@ const RoomsPage = () => {
     } catch (pinError) {
       console.error('Error updating room pin state:', pinError);
       setError(pinError.message || 'Failed to update the pinned message.');
+    }
+  };
+
+  const handleToggleReaction = async (message, emoji) => {
+    try {
+      const response = await api.reactToRoomMessage(selectedRoom._id, message._id, emoji);
+      const updatedMessage = await cryptoService.hydrateRoomMessage(response?.message || response?.data?.message);
+      if (updatedMessage) {
+        updateRoomMessageEverywhere(updatedMessage);
+      }
+    } catch (reactionError) {
+      console.error('Error updating room reaction:', reactionError);
+      setError(reactionError.message || 'Failed to update reaction.');
+    }
+  };
+
+  const startEditingMessage = (message) => {
+    const text = getMessageTextContent(message);
+    if (!text || message.encryptedContent) {
+      setError('Secure room messages cannot be edited in place.');
+      return;
+    }
+
+    setEditingMessage(message);
+    setMessageInput(text);
+  };
+
+  const cancelEditingMessage = () => {
+    setEditingMessage(null);
+    setMessageInput('');
+  };
+
+  const handleDeleteRoomMessage = async (message) => {
+    if (!window.confirm('Delete this room message?')) {
+      return;
+    }
+
+    try {
+      const response = await api.deleteRoomMessage(selectedRoom._id, message._id);
+      const updatedMessage = await cryptoService.hydrateRoomMessage(response?.message || response?.data?.message);
+      if (updatedMessage) {
+        updateRoomMessageEverywhere(updatedMessage);
+      }
+    } catch (deleteError) {
+      console.error('Error deleting room message:', deleteError);
+      setError(deleteError.message || 'Failed to delete room message.');
     }
   };
 
@@ -731,10 +833,32 @@ const RoomsPage = () => {
     );
   };
 
-  const encryptionBlocked = encryptionState?.status !== 'ready';
   const activeTimerOption = getDisappearingTimerOption(disappearingTimer);
   const cycleDisappearingTimer = () => {
     setDisappearingTimer((currentValue) => getNextDisappearingTimer(currentValue));
+  };
+  const getReactionSummary = (reactions = []) => {
+    const summary = new Map();
+
+    reactions.forEach((reaction) => {
+      const emoji = reaction.emoji;
+      if (!emoji) {
+        return;
+      }
+
+      const entry = summary.get(emoji) || {
+        emoji,
+        count: 0,
+        reactedByCurrentUser: false
+      };
+      entry.count += 1;
+      if (idsEqual(reaction.user?._id || reaction.user, user?._id || user?.id)) {
+        entry.reactedByCurrentUser = true;
+      }
+      summary.set(emoji, entry);
+    });
+
+    return Array.from(summary.values());
   };
   const typingText = typingUsers.size > 0
     ? `${Array.from(typingUsers).join(', ')} typing...`
@@ -801,7 +925,7 @@ const RoomsPage = () => {
                   onClick={() => setRoomForm((currentValue) => ({ ...currentValue, type }))}
                   className={`rounded-xl border px-3 py-2 text-sm font-medium transition-colors ${
                     roomForm.type === type
-                      ? 'border-emerald-400/40 bg-accent text-void hover:brightness-110/20 text-emerald-100'
+                      ? 'border-emerald-400/40 bg-accent hover:brightness-110/20 text-emerald-100'
                       : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10'
                   }`}
                 >
@@ -941,6 +1065,15 @@ const RoomsPage = () => {
             {(messages || []).map((message) => {
               const senderId = normalizeId(message?.sender?._id || message?.sender);
               const isOwn = idsEqual(senderId, user?._id || user?.id);
+              const reactionSummary = getReactionSummary(message.reactions);
+              const isModerator = (selectedRoom?.admins || []).some((adminId) => idsEqual(adminId, user?._id || user?.id))
+                || (selectedRoom?.moderators || []).some((moderatorId) => idsEqual(moderatorId, user?._id || user?.id))
+                || idsEqual(selectedRoom?.creator?._id || selectedRoom?.creator, user?._id || user?.id);
+              const canEditMessage = isOwn
+                && !message.encryptedContent
+                && message.messageType === 'text'
+                && !message.isDeleted;
+              const canDeleteMessage = (isOwn || isModerator) && !message.isDeleted;
               const hasAttachment = Boolean(
                 message?.content?.file?.url
                 || message?.fileUrl
@@ -989,6 +1122,30 @@ const RoomsPage = () => {
                     ) : (
                       <p className="break-words">{message?.content?.text || ''}</p>
                     )}
+                    {message.isEdited && (
+                      <div className="mt-1 text-[10px] uppercase tracking-wide text-white/40">
+                        edited
+                      </div>
+                    )}
+
+                    {reactionSummary.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {reactionSummary.map((reaction) => (
+                          <button
+                            key={reaction.emoji}
+                            type="button"
+                            onClick={() => handleToggleReaction(message, reaction.emoji)}
+                            className={`rounded-full px-2 py-0.5 text-xs transition-colors ${
+                              reaction.reactedByCurrentUser
+                                ? 'bg-accent/25 text-accent'
+                                : 'bg-black/20 text-white/75 hover:bg-black/30'
+                            }`}
+                          >
+                            {reaction.emoji} {reaction.count}
+                          </button>
+                        ))}
+                      </div>
+                    )}
 
                     {(message.isViewOnce || message.expiresAt || message.isExpired) && (
                       <div className="mt-2 flex flex-wrap gap-1.5">
@@ -1020,6 +1177,37 @@ const RoomsPage = () => {
                           <Pin className="h-3 w-3" />
                           {message.isPinned ? 'Unpin' : 'Pin'}
                         </button>
+                        {['👍', '❤️', '😂'].map((emoji) => (
+                          <button
+                            key={emoji}
+                            type="button"
+                            onClick={() => handleToggleReaction(message, emoji)}
+                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                          >
+                            <Smile className="h-3 w-3" />
+                            {emoji}
+                          </button>
+                        ))}
+                        {canEditMessage && (
+                          <button
+                            type="button"
+                            onClick={() => startEditingMessage(message)}
+                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                          >
+                            <Pencil className="h-3 w-3" />
+                            Edit
+                          </button>
+                        )}
+                        {canDeleteMessage && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteRoomMessage(message)}
+                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-red-200 transition-colors hover:bg-red-500/15"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                            Delete
+                          </button>
+                        )}
                         {isForwardablePlaintextMessage(message) && (
                           <button
                             type="button"
@@ -1045,6 +1233,18 @@ const RoomsPage = () => {
           </div>
 
           <div className="relative z-10 p-3 md:p-4 bg-void/80 backdrop-blur-xl border-t border-bd-subtle">
+            {editingMessage && (
+              <div className="mb-2 flex items-center justify-between gap-3 rounded-2xl border border-accent/20 bg-accent/10 px-3 py-2 text-xs text-accent">
+                <span className="truncate">Editing room message</span>
+                <button
+                  type="button"
+                  onClick={cancelEditingMessage}
+                  className="rounded-full px-2 py-1 text-white/70 transition hover:bg-white/10 hover:text-white"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -1094,8 +1294,8 @@ const RoomsPage = () => {
                   type="text"
                   value={messageInput}
                   onChange={handleTyping}
-                  disabled={encryptionBlocked}
-                  placeholder={encryptionBlocked ? 'Import your key backup to send encrypted room messages' : 'Type a room message'}
+                  disabled={!editingMessage && encryptionBlocked}
+                  placeholder={encryptionBlocked ? 'Import your key backup to send encrypted room messages' : editingMessage ? 'Edit room message' : 'Type a room message'}
                   className="w-full rounded-3xl border border-white/10 px-5 py-3.5 text-tx-primary placeholder-tx-muted focus:outline-none focus:border-white/20 disabled:cursor-not-allowed disabled:opacity-60"
                   style={{ background: 'rgba(15,23,42,0.8)' }}
                 />
@@ -1103,11 +1303,11 @@ const RoomsPage = () => {
 
               <button
                 type="submit"
-                disabled={!messageInput.trim() || encryptionBlocked}
+                disabled={!messageInput.trim() || (!editingMessage && encryptionBlocked)}
                 className="rounded-2xl bg-accent text-void hover:brightness-110 p-3.5 transition-all disabled:cursor-not-allowed disabled:opacity-50 hover:brightness-110"
-                title="Send room message"
+                title={editingMessage ? 'Save room message' : 'Send room message'}
               >
-                <Send className="w-5 h-5" />
+                {editingMessage ? <Pencil className="w-5 h-5" /> : <Send className="w-5 h-5" />}
               </button>
             </form>
           </div>

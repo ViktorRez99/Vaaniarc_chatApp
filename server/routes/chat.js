@@ -1,9 +1,11 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
 const Chat = require('../models/Chat');
 const PrivateMessage = require('../models/PrivateMessage');
 const User = require('../models/User');
 const cacheService = require('../services/cacheService');
+const logger = require('../utils/logger');
 const { arrayIncludesId } = require('../utils/idHelpers');
 const {
   buildPrivateParticipantHash,
@@ -46,6 +48,8 @@ const {
   resolveStoredTextContent
 } = require('../utils/secureMessaging');
 const { normalizeForwardedFrom } = require('../utils/forwardedMessage');
+const { buildSafeSearchRegex } = require('../utils/validation');
+const { getBlockRelationshipFor, getBlockedUserIdsFor, isBlockedBetween } = require('../utils/userBlocks');
 
 const emitPrivateMessageEvent = (req, chat, eventName, payload) => {
   const io = req.app.get('io');
@@ -62,8 +66,12 @@ const emitPrivateMessageEvent = (req, chat, eventName, payload) => {
 router.get('/chats', async (req, res) => {
   try {
     const userId = req.user._id;
+    const includeArchived = String(req.query?.archived || '').toLowerCase() === 'true';
     
-    const chats = await Chat.find({ participants: userId })
+    const chats = await Chat.find({
+      participants: userId,
+      ...(includeArchived ? { archivedFor: userId } : { archivedFor: { $ne: userId } })
+    })
       .populate('participants', 'username avatar status firstName lastName')
       .populate({
         path: 'lastMessage',
@@ -82,8 +90,49 @@ router.get('/chats', async (req, res) => {
       return nextChat;
     }));
   } catch (error) {
-    console.error('Error fetching chats:', error);
+    logger.error('Error fetching chats:', error);
     res.status(500).json({ message: 'Failed to fetch chats' });
+  }
+});
+
+router.patch('/chats/:chatId/archive', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const archived = Boolean(req.body?.archived);
+    const userId = req.user._id;
+
+    const chat = await Chat.findOneAndUpdate(
+      {
+        _id: chatId,
+        participants: userId
+      },
+      archived
+        ? { $addToSet: { archivedFor: userId } }
+        : { $pull: { archivedFor: userId } },
+      { new: true }
+    )
+      .populate('participants', 'username avatar status firstName lastName')
+      .populate({
+        path: 'lastMessage',
+        select: PRIVATE_MESSAGE_SELECT
+      });
+
+    if (!chat) {
+      return res.status(404).json({ message: 'Chat not found' });
+    }
+
+    const nextChat = chat.toObject();
+    if (nextChat.lastMessage) {
+      nextChat.lastMessage = serializePrivateMessageForUser(nextChat.lastMessage, userId);
+    }
+
+    res.json({
+      chat: nextChat,
+      archived
+    });
+  } catch (error) {
+    logger.error('Chat archive update error', error);
+    res.status(500).json({ message: 'Failed to update chat archive state' });
   }
 });
 
@@ -106,6 +155,10 @@ router.post('/chats', async (req, res) => {
     const recipient = await User.findById(recipientId);
     if (!recipient) {
       return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (await isBlockedBetween(userId, recipient._id)) {
+      return res.status(403).json({ message: 'Messaging is unavailable for this user.' });
     }
 
     const participantHash = buildPrivateParticipantHash(normalizedParticipants);
@@ -183,7 +236,7 @@ router.post('/chats', async (req, res) => {
 
     res.json(nextChat);
   } catch (error) {
-    console.error('Error creating chat:', error);
+    logger.error('Error creating chat:', error);
     res.status(500).json({ message: 'Failed to create chat' });
   }
 });
@@ -220,8 +273,51 @@ router.get('/chats/:chatId/messages', async (req, res) => {
 
     res.json(serializePrivateMessagesForUser(messages.reverse(), userId));
   } catch (error) {
-    console.error('Error fetching messages:', error);
+    logger.error('Error fetching messages:', error);
     res.status(500).json({ message: 'Failed to fetch messages' });
+  }
+});
+
+router.get('/chats/:chatId/messages/search', async (req, res) => {
+  try {
+    const { chatId } = req.params;
+    const { q, limit = 25 } = req.query;
+    const userId = req.user._id;
+    const searchRegex = buildSafeSearchRegex(q);
+
+    if (!searchRegex) {
+      return res.status(400).json({ message: 'Search query must be valid text.' });
+    }
+
+    const chat = await Chat.findById(chatId);
+    if (!chat) {
+      return res.status(404).json({ message: 'Chat not found' });
+    }
+
+    if (!arrayIncludesId(chat.participants, userId)) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const messages = await populatePrivateMessage(
+      PrivateMessage.find({
+        ...buildActiveMessageQuery({ chatId }),
+        $or: [
+          { encryptedContent: null, content: searchRegex },
+          { 'fileMetadata.originalName': searchRegex },
+          { 'fileMetadata.filename': searchRegex }
+        ]
+      })
+        .sort({ createdAt: -1 })
+        .limit(parsePaginationLimit(limit, 25, 50))
+    );
+
+    res.json({
+      encryptedSearchLimited: true,
+      messages: serializePrivateMessagesForUser(messages, userId)
+    });
+  } catch (error) {
+    logger.error('Error searching messages:', error);
+    res.status(500).json({ message: 'Failed to search messages' });
   }
 });
 
@@ -254,7 +350,7 @@ router.get('/chats/:chatId/messages/pinned', async (req, res) => {
       messages: serializePrivateMessagesForUser(messages, userId)
     });
   } catch (error) {
-    console.error('Error fetching pinned private messages:', error);
+    logger.error('Error fetching pinned private messages:', error);
     res.status(500).json({ message: 'Failed to fetch pinned messages' });
   }
 });
@@ -275,6 +371,10 @@ router.post('/chats/:chatId/messages', async (req, res) => {
       forwardedFrom
     } = req.body;
     const userId = req.user._id;
+    if (messageType === 'text' && !encryptedContent) {
+      return res.status(400).json({ message: 'Encrypted content is required for direct messages.' });
+    }
+
     const storedContent = resolveStoredTextContent({
       plaintext: content,
       encryptedContent
@@ -295,6 +395,11 @@ router.post('/chats/:chatId/messages', async (req, res) => {
 
     if (!arrayIncludesId(chat.participants, userId)) {
       return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const otherParticipantId = chat.participants.find((participantId) => !arrayIncludesId([participantId], userId));
+    if (otherParticipantId && await isBlockedBetween(userId, otherParticipantId)) {
+      return res.status(403).json({ message: 'Messaging is unavailable for this chat.' });
     }
 
     if (!payloadValidation.isValid) {
@@ -390,7 +495,7 @@ router.post('/chats/:chatId/messages', async (req, res) => {
 
     res.status(201).json(serializePrivateMessageForUser(message, userId));
   } catch (error) {
-    console.error('Error sending message:', error);
+    logger.error('Error sending message:', error);
     if (String(error.message || '').toLowerCase().includes('plaintext content')) {
       return res.status(400).json({ message: error.message });
     }
@@ -432,7 +537,7 @@ router.patch('/chats/:chatId/messages/read', async (req, res) => {
 
     res.json({ message: 'Messages marked as read' });
   } catch (error) {
-    console.error('Error marking messages as read:', error);
+    logger.error('Error marking messages as read:', error);
     res.status(500).json({ message: 'Failed to mark messages as read' });
   }
 });
@@ -470,7 +575,7 @@ router.post('/chats/:chatId/messages/:messageId/consume-view-once', async (req, 
       message: serializePrivateMessageForUser(message, userId)
     });
   } catch (error) {
-    console.error('Error consuming view-once message:', error);
+    logger.error('Error consuming view-once message:', error);
     res.status(500).json({ message: 'Failed to consume the view-once attachment' });
   }
 });
@@ -532,7 +637,7 @@ router.patch('/chat/messages/:messageId/pin', async (req, res) => {
 
     res.json(payload);
   } catch (error) {
-    console.error('Error pinning private message:', error);
+    logger.error('Error pinning private message:', error);
     res.status(500).json({ message: 'Failed to update the pinned state' });
   }
 });
@@ -599,7 +704,7 @@ router.post('/chat/messages/:messageId/reactions', async (req, res) => {
 
     res.json(payload);
   } catch (error) {
-    console.error('Error updating private message reaction:', error);
+    logger.error('Error updating private message reaction:', error);
     res.status(500).json({ message: 'Failed to update the reaction' });
   }
 });
@@ -657,7 +762,7 @@ router.delete('/chat/messages/:messageId/reactions/:emoji', async (req, res) => 
 
     res.json(payload);
   } catch (error) {
-    console.error('Error removing private message reaction:', error);
+    logger.error('Error removing private message reaction:', error);
     res.status(500).json({ message: 'Failed to remove the reaction' });
   }
 });
@@ -737,7 +842,7 @@ router.put('/chat/messages/:messageId', async (req, res) => {
 
     res.json(payload);
   } catch (error) {
-    console.error('Error editing private message:', error);
+    logger.error('Error editing private message:', error);
     if (error?.statusCode) {
       return res.status(error.statusCode).json({ message: error.message });
     }
@@ -803,7 +908,7 @@ router.delete('/chat/messages/:messageId', async (req, res) => {
 
     res.json(payload);
   } catch (error) {
-    console.error('Error deleting private message:', error);
+    logger.error('Error deleting private message:', error);
     res.status(500).json({ message: 'Failed to delete the message' });
   }
 });
@@ -818,9 +923,16 @@ router.get('/users', async (req, res) => {
       _id: { $ne: userId },
       isActive: true
     };
+    const blockedUserIds = await getBlockedUserIdsFor(userId);
+    if (blockedUserIds.length) {
+      query._id = { $ne: userId, $nin: blockedUserIds };
+    }
 
     if (search) {
-      query.username = { $regex: search, $options: 'i' };
+      const safeSearchRegex = buildSafeSearchRegex(search);
+      if (safeSearchRegex) {
+        query.username = safeSearchRegex;
+      }
     }
 
     const users = await User.find(query)
@@ -829,7 +941,7 @@ router.get('/users', async (req, res) => {
 
     res.json(users);
   } catch (error) {
-    console.error('Error fetching users:', error);
+    logger.error('Error fetching users:', error);
     res.status(500).json({ message: 'Failed to fetch users' });
   }
 });
@@ -838,6 +950,10 @@ router.get('/users', async (req, res) => {
 router.get('/users/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(String(userId || ''))) {
+      return res.status(400).json({ message: 'Invalid user id' });
+    }
+
     const user = await cacheService.memory.remember(
       `user-profile:${userId}`,
       30000,
@@ -850,9 +966,14 @@ router.get('/users/:userId', async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    res.json(user);
+    const blockState = await getBlockRelationshipFor(req.user._id, userId);
+
+    res.json({
+      ...user,
+      ...blockState
+    });
   } catch (error) {
-    console.error('Error fetching user details:', error);
+    logger.error('Error fetching user details:', error);
     res.status(500).json({ message: 'Failed to fetch user details' });
   }
 });

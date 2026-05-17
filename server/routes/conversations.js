@@ -1,3 +1,4 @@
+const logger = require('../utils/logger');
 const express = require('express');
 
 const router = express.Router();
@@ -195,7 +196,7 @@ router.get('/conversations', async (req, res) => {
 
     res.json({ conversations });
   } catch (error) {
-    console.error('Conversation fetch error:', error);
+    logger.error('Conversation fetch error:', error);
     res.status(500).json({ message: 'Failed to fetch conversations' });
   }
 });
@@ -277,7 +278,7 @@ router.post('/conversations', async (req, res) => {
 
     return res.status(400).json({ message: 'Conversation type must be direct or group. Create channels via /api/channels.' });
   } catch (error) {
-    console.error('Conversation creation error:', error);
+    logger.error('Conversation creation error:', error);
     res.status(500).json({ message: 'Failed to create conversation' });
   }
 });
@@ -380,7 +381,7 @@ router.get('/conversations/:conversationId/messages', async (req, res) => {
       messages: posts.reverse().map(serializeChannelPost)
     });
   } catch (error) {
-    console.error('Conversation messages error:', error);
+    logger.error('Conversation messages error:', error);
     res.status(500).json({ message: 'Failed to fetch conversation messages' });
   }
 });

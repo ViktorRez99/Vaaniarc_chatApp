@@ -24,6 +24,7 @@ class SocketService {
     this.listenerMap = new Map();
     this.status = 'idle';
     this.lastError = null;
+    this.heartbeatInterval = null;
     this.statusListeners = new Set();
     this.handleBrowserOnline = this.handleBrowserOnline.bind(this);
     this.handleBrowserOffline = this.handleBrowserOffline.bind(this);
@@ -85,15 +86,15 @@ class SocketService {
     }
 
     this.socket.on('connect', () => {
-      console.log('Socket connected:', this.socket.id);
       this.isConnected = true;
       this.notifyStatus('connected');
+      this.startHeartbeat();
       this.flushOfflineQueue();
     });
 
     this.socket.on('disconnect', (reason) => {
-      console.log('Socket disconnected:', reason);
       this.isConnected = false;
+      this.stopHeartbeat();
       this.notifyStatus('disconnected', {
         error: reason && reason !== 'io client disconnect'
           ? new Error(`Realtime connection closed: ${reason}`)
@@ -116,6 +117,31 @@ class SocketService {
       const decodedPayload = decodeSocketPayload(payload);
       this.acknowledgeQueuedMessage(decodedPayload?.tempId);
     });
+  }
+
+  startHeartbeat() {
+    this.stopHeartbeat();
+    if (!this.socket) {
+      return;
+    }
+
+    this.socket.emit('heartbeat');
+    const setTimer = typeof window !== 'undefined' ? window.setInterval : setInterval;
+    this.heartbeatInterval = setTimer(() => {
+      if (this.socket?.connected) {
+        this.socket.emit('heartbeat');
+      }
+    }, 30000);
+  }
+
+  stopHeartbeat() {
+    if (!this.heartbeatInterval) {
+      return;
+    }
+
+    const clearTimer = typeof window !== 'undefined' ? window.clearInterval : clearInterval;
+    clearTimer(this.heartbeatInterval);
+    this.heartbeatInterval = null;
   }
 
   loadOfflineQueue() {
@@ -321,6 +347,7 @@ class SocketService {
 
   disconnect() {
     if (this.socket) {
+      this.stopHeartbeat();
       this.socket.disconnect();
       this.socket = null;
     }

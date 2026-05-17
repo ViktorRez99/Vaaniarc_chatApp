@@ -2,12 +2,14 @@ import { Suspense, lazy, Component, useEffect, useState } from "react"
 import { Navigate, Route, Routes, useLocation } from "react-router-dom"
 import { AnimatePresence, motion } from "framer-motion"
 import { AuthProvider, useAuth } from "./context/AuthContext"
+import { SocketProvider } from "./context/SocketContext"
 import Auth from "./components/Auth"
 import { Toaster } from "./components/ui/Toaster"
 
 const ChatHub = lazy(() => import("./components/ChatHub"))
 const Settings = lazy(() => import("./components/Settings"))
 const PasskeySetup = lazy(() => import("./components/PasskeySetup"))
+const VerifyEmail = lazy(() => import("./components/VerifyEmail"))
 const DeviceEncryptionResetModal = lazy(() => import("./components/DeviceEncryptionResetModal"))
 const PwaRuntimeBanner = lazy(() => import("./components/PwaRuntimeBanner"))
 
@@ -144,6 +146,7 @@ const AuthenticatedRoutes = () => {
     <AnimatePresence mode="wait" initial={false}>
       <Routes location={location} key={location.pathname}>
         <Route path="/auth" element={<PublicOnlyRoute><PageMotion><AuthErrorBoundary><Auth /></AuthErrorBoundary></PageMotion></PublicOnlyRoute>} />
+        <Route path="/verify-email" element={<PageMotion><VerifyEmail /></PageMotion>} />
         <Route path="/passkey-setup" element={<PasskeySetupRoute><PageMotion><PasskeySetup /></PageMotion></PasskeySetupRoute>} />
         <Route path="/chat" element={<ProtectedRoute><PageMotion><ChatHub /></PageMotion></ProtectedRoute>} />
         <Route path="/meeting/:meetingId" element={<ProtectedRoute><PageMotion><ChatHub /></PageMotion></ProtectedRoute>} />
@@ -157,10 +160,12 @@ const AuthenticatedRoutes = () => {
 const AuthenticatedApp = () => (
   <div className="min-h-screen" style={{ background: '#000', minHeight: '100vh' }}>
     <AuthProvider>
-      <Suspense fallback={<LoadingScreen />}>
-        <AuthenticatedRoutes />
-        <RuntimeOverlays />
-      </Suspense>
+      <SocketProvider>
+        <Suspense fallback={<LoadingScreen />}>
+          <AuthenticatedRoutes />
+          <RuntimeOverlays />
+        </Suspense>
+      </SocketProvider>
     </AuthProvider>
     <Toaster />
   </div>
