@@ -5,6 +5,7 @@ const ChannelPost = require('../models/ChannelPost');
 const Community = require('../models/Community');
 const { buildUniqueSlug } = require('../utils/slug');
 const logger = require('../utils/logger');
+const { logMessageModeration } = require('../middleware/auditLog');
 const { arrayIncludesId, normalizeId } = require('../utils/idHelpers');
 const { buildConversationId } = require('../utils/conversationHelpers');
 const { buildSafeSearchRegex } = require('../utils/validation');
@@ -121,11 +122,19 @@ router.get('/channels', async (req, res) => {
       .sort({ lastActivity: -1, createdAt: -1 })
       .limit(30);
 
-    const channelsWithLastPost = await loadLatestPosts(channels);
+    const latestPostByChannelId = await loadLatestPosts(channels.map((channel) => channel._id));
 
     res.json({
-      channels: channelsWithLastPost.map((channel) => ({...serializeChannel(channel, userId), isJoined: true}))
+      channels: channels.map((channel) => ({
+        ...serializeChannel(channel, userId, latestPostByChannelId.get(normalizeId(channel._id)) || null),
+        isJoined: true
+      }))
     });
+  } catch (error) {
+    logger.error('Channel list error', error);
+    res.status(500).json({ message: 'Failed to load channels' });
+  }
+});
 
 router.get('/channels/discover', async (req, res) => {
   try {

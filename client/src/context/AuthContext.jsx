@@ -177,6 +177,14 @@ const isMissingSessionError = (error) => /authentication required|session requir
   String(error?.message || '')
 );
 
+const isDeviceIdClaimedError = (error) => (
+  error?.statusCode === 409
+  && (
+    error?.responseBody?.code === 'DEVICE_ID_CLAIMED'
+    || /device id is already linked to another account/i.test(String(error?.message || ''))
+  )
+);
+
 const isTransientSessionRestoreError = (error) => {
   const normalizedMessage = String(error?.message || '').toLowerCase();
 
@@ -386,14 +394,38 @@ export const AuthProvider = ({ children }) => {
         await registerAndLoadCurrentDevice(resolvedEncryptionState);
         deviceRegistrationReady = true;
       } catch (deviceError) {
-        console.warn('Device bootstrap failed:', deviceError);
-        resolvedIssue = pickRuntimeIssue(
-          resolvedIssue,
-          classifyBootstrapError(deviceError, 'device')
-        );
-        applyIfCurrent(runId, () => {
-          setDevices([]);
-        });
+        if (isDeviceIdClaimedError(deviceError)) {
+          console.warn('Current browser device ID belongs to another account. Rotating device ID and rebuilding local encryption identity.');
+          apiService.rotateCurrentDeviceId();
+          applyIfCurrent(runId, () => {
+            setCurrentDeviceId(apiService.getCurrentDeviceId());
+          });
+
+          try {
+            resolvedEncryptionState = await syncEncryptionState(resolvedUser);
+            resolvedIssue = pickRuntimeIssue(resolvedIssue, getEncryptionIssue(resolvedEncryptionState));
+            await registerAndLoadCurrentDevice(resolvedEncryptionState);
+            deviceRegistrationReady = true;
+          } catch (repairError) {
+            console.warn('Device bootstrap repair failed:', repairError);
+            resolvedIssue = pickRuntimeIssue(
+              resolvedIssue,
+              classifyBootstrapError(repairError, 'device')
+            );
+            applyIfCurrent(runId, () => {
+              setDevices([]);
+            });
+          }
+        } else {
+          console.warn('Device bootstrap failed:', deviceError);
+          resolvedIssue = pickRuntimeIssue(
+            resolvedIssue,
+            classifyBootstrapError(deviceError, 'device')
+          );
+          applyIfCurrent(runId, () => {
+            setDevices([]);
+          });
+        }
       }
 
       if (deviceRegistrationReady) {

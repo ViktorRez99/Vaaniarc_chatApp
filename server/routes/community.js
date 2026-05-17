@@ -52,6 +52,11 @@ router.get('/communities', async (req, res) => {
     res.json({
       communities: communities.map((c) => ({...serializeCommunity(c, userId), isJoined: true}))
     });
+  } catch (error) {
+    logger.error('Community list error', error);
+    res.status(500).json({ message: 'Failed to load communities' });
+  }
+});
 
 router.get('/communities/discover', async (req, res) => {
   try {

@@ -42,6 +42,16 @@ export const getOrCreateDeviceId = () => {
   return nextDeviceId;
 };
 
+export const rotateDeviceId = () => {
+  if (!canUseBrowserStorage()) {
+    return null;
+  }
+
+  const nextDeviceId = generateDeviceId();
+  localStorage.setItem(DEVICE_ID_STORAGE_KEY, nextDeviceId);
+  return nextDeviceId;
+};
+
 const matchLabel = (source, matchers, fallback) => {
   if (!source) {
     return fallback;

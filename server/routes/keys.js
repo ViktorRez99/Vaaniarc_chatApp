@@ -150,8 +150,16 @@ router.get('/identity/:userId', authenticateToken, async (req, res) => {
 
     const user = await User.findById(userId).select('identityKey username');
 
-    if (!user || !user.identityKey) {
-      return res.status(404).json({ message: 'User identity key not found' });
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (!user.identityKey) {
+      return res.json({
+        identityKey: null,
+        username: user.username,
+        needsSetup: true
+      });
     }
 
     res.json({
@@ -187,6 +195,14 @@ router.post('/devices/register', authenticateToken, requireCsrf, async (req, res
 
     if (!keyBundle?.signedPreKey?.id || !keyBundle?.signedPreKey?.publicKey || !keyBundle?.signedPreKey?.signature) {
       return res.status(400).json({ message: 'A signed prekey is required for device encryption.' });
+    }
+
+    const claimedDevice = await Device.findOne({ deviceId }).select('user');
+    if (claimedDevice && claimedDevice.user.toString() !== userId.toString()) {
+      return res.status(409).json({
+        code: 'DEVICE_ID_CLAIMED',
+        message: 'Device ID is already linked to another account.'
+      });
     }
 
     const existingDevice = await Device.findOne({ user: userId, deviceId }).select(
@@ -304,6 +320,12 @@ router.post('/devices/register', authenticateToken, requireCsrf, async (req, res
     });
   } catch (error) {
     logger.error('Device key bundle storage error:', error);
+    if (error?.code === 11000) {
+      return res.status(409).json({
+        code: 'DEVICE_ID_CLAIMED',
+        message: 'Device ID is already linked to another account.'
+      });
+    }
     res.status(500).json({ message: 'Failed to store device key bundle' });
   }
 });
@@ -320,9 +342,6 @@ router.get('/devices/:userId', authenticateToken, async (req, res) => {
       .sort({ lastActive: -1 })
       .select('deviceId deviceName browser platform keyBundle keyBundleVersion publicKeyFingerprint lastActive linkedAt user');
 
-    if (!devices.length) {
-      return res.status(404).json({ message: 'No active device bundles found for this user' });
-    }
     const materialMap = await buildDeviceKeyMaterialMap(devices);
 
     res.json({

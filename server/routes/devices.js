@@ -80,7 +80,10 @@ router.post('/', async (req, res) => {
 
     const claimedDevice = await Device.findOne({ deviceId: resolvedDeviceId });
     if (claimedDevice && claimedDevice.user.toString() !== userId.toString()) {
-      return res.status(409).json({ message: 'Device ID is already linked to another account.' });
+      return res.status(409).json({
+        code: 'DEVICE_ID_CLAIMED',
+        message: 'Device ID is already linked to another account.'
+      });
     }
 
     let device = await Device.findOne({ deviceId: resolvedDeviceId, user: userId });

@@ -1,4 +1,4 @@
-import { getCurrentDeviceSnapshot, getOrCreateDeviceId } from '../utils/device';
+import { getCurrentDeviceSnapshot, getOrCreateDeviceId, rotateDeviceId } from '../utils/device';
 
 // API Service for authentication and chat functionality
 const resolveApiBaseUrl = () => {
@@ -99,6 +99,11 @@ class ApiService {
       this.deviceId = getOrCreateDeviceId();
     }
 
+    return this.deviceId;
+  }
+
+  rotateCurrentDeviceId() {
+    this.deviceId = rotateDeviceId();
     return this.deviceId;
   }
 

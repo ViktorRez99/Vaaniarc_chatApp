@@ -167,7 +167,11 @@ const buildIdentityState = ({
   message
 });
 
-const isNotFoundError = (error) => /resource not found/i.test(String(error?.message || ''));
+const isNotFoundError = (error) => (
+  error?.statusCode === 404
+  || error?.category === 'not_found'
+  || /not found|not set up|no active device/i.test(String(error?.message || ''))
+);
 
 const extractAttachmentDetails = (message) => {
   if (message?.fileMetadata?.encryptionPayload) {
@@ -884,9 +888,7 @@ const cryptoService = {
 
     try {
       const response = await api.get(`/keys/identity/${normalizedUserId}`);
-      const payload = typeof response.identityKey === 'string'
-        ? JSON.parse(response.identityKey)
-        : response.identityKey;
+      const payload = parsePayload(response.identityKey);
 
       if (!payload?.publicJwk) {
         return null;
