@@ -286,6 +286,50 @@ const cryptoService = {
     return this.activeDeviceId;
   },
 
+  getEncryptedPayloadDeviceInfo(payload) {
+    const parsedPayload = parsePayload(payload);
+    const envelopes = Array.isArray(parsedPayload?.envelopes) ? parsedPayload.envelopes : [];
+
+    return {
+      protocolVersion: Number(parsedPayload?.version || parsedPayload?.protocolVersion || 1),
+      senderUserId: normalizeId(parsedPayload?.senderUserId),
+      senderDeviceId: parsedPayload?.senderDeviceId || null,
+      targetDeviceIds: [...new Set(envelopes
+        .map((envelope) => envelope?.deviceId)
+        .filter((deviceId) => typeof deviceId === 'string' && deviceId.trim().length > 0)
+        .map((deviceId) => deviceId.trim()))]
+    };
+  },
+
+  isPayloadBoundToCurrentDevice(payload) {
+    const currentDeviceId = this.getCurrentDeviceId();
+    const metadata = this.getEncryptedPayloadDeviceInfo(payload);
+
+    if (!currentDeviceId || metadata.protocolVersion < DEVICE_PAYLOAD_VERSION) {
+      return true;
+    }
+
+    return metadata.senderDeviceId === currentDeviceId
+      && metadata.targetDeviceIds.includes(currentDeviceId);
+  },
+
+  clearDeviceBundleCache(userIds = []) {
+    const normalizedUserIds = Array.isArray(userIds) ? userIds : [userIds];
+    if (!normalizedUserIds.length) {
+      this.deviceBundleCache.clear();
+      return;
+    }
+
+    normalizedUserIds
+      .map((userId) => normalizeId(userId))
+      .filter(Boolean)
+      .forEach((userId) => this.deviceBundleCache.delete(userId));
+  },
+
+  getDeviceBundleFingerprint(device) {
+    return device?.keyBundle?.fingerprint || device?.publicKeyFingerprint || null;
+  },
+
   async ensureSodiumReady() {
     if (!this.sodiumReady) {
       this.sodiumReady = sodium.ready.then(() => sodium);
@@ -1933,7 +1977,7 @@ const cryptoService = {
     }
 
     const bundleCollections = await Promise.all(
-      normalizedUserIds.map(async (userId) => [userId, await this.fetchUserDeviceBundles(userId)])
+      normalizedUserIds.map(async (userId) => [userId, await this.fetchUserDeviceBundles(userId, { refresh: true })])
     );
 
     const validBundleCollections = bundleCollections.map(([userId, devices]) => [
@@ -2005,42 +2049,50 @@ const cryptoService = {
     }
 
     const sodiumInstance = await this.ensureSodiumReady();
-    const senderDevices = await this.fetchUserDeviceBundles(parsedPayload.senderUserId);
-    const senderDevice = senderDevices.find((device) => device.deviceId === parsedPayload.senderDeviceId);
-    const signingPublicKey = senderDevice?.keyBundle?.signingPublicKey;
-    const pqSigningPublicKey = this.getPostQuantumSignaturePublicKey(senderDevice);
     const payloadVersion = Number(parsedPayload.version || parsedPayload.protocolVersion || 1);
+    const verifyWithBundle = async (refresh = false) => {
+      const senderDevices = await this.fetchUserDeviceBundles(parsedPayload.senderUserId, { refresh });
+      const senderDevice = senderDevices.find((device) => device.deviceId === parsedPayload.senderDeviceId);
+      const signingPublicKey = senderDevice?.keyBundle?.signingPublicKey;
+      const pqSigningPublicKey = this.getPostQuantumSignaturePublicKey(senderDevice);
 
-    if (!signingPublicKey) {
-      return false;
-    }
+      if (!signingPublicKey) {
+        return false;
+      }
 
-    const payloadBytes = textEncoder.encode(stableStringify(withoutSignature(parsedPayload)));
-    const isClassicalValid = sodiumInstance.crypto_sign_verify_detached(
-      bytesFromBase64(parsedPayload.signature),
-      payloadBytes,
-      bytesFromBase64(signingPublicKey)
-    );
+      const payloadBytes = textEncoder.encode(stableStringify(withoutSignature(parsedPayload)));
+      const isClassicalValid = sodiumInstance.crypto_sign_verify_detached(
+        bytesFromBase64(parsedPayload.signature),
+        payloadBytes,
+        bytesFromBase64(signingPublicKey)
+      );
 
-    if (!isClassicalValid) {
-      return false;
-    }
+      if (!isClassicalValid) {
+        return false;
+      }
 
-    if (!pqSigningPublicKey) {
+      if (!pqSigningPublicKey) {
+        return true;
+      }
+
+      const requiresPostQuantumSignature = payloadVersion >= DIRECT_SESSION_PAYLOAD_VERSION
+        || (
+          payloadVersion === DEVICE_PAYLOAD_VERSION
+          && String(parsedPayload?.algorithm || '').includes(POST_QUANTUM_SIGNATURE_ALGORITHM)
+        );
+
+      if (!parsedPayload?.pqSignature) {
+        return !requiresPostQuantumSignature;
+      }
+
+      return verifyPostQuantumSignature(parsedPayload.pqSignature, payloadBytes, pqSigningPublicKey);
+    };
+
+    if (await verifyWithBundle(false)) {
       return true;
     }
 
-    const requiresPostQuantumSignature = payloadVersion >= DIRECT_SESSION_PAYLOAD_VERSION
-      || (
-        payloadVersion === DEVICE_PAYLOAD_VERSION
-        && String(parsedPayload?.algorithm || '').includes(POST_QUANTUM_SIGNATURE_ALGORITHM)
-      );
-
-    if (!parsedPayload?.pqSignature) {
-      return !requiresPostQuantumSignature;
-    }
-
-    return verifyPostQuantumSignature(parsedPayload.pqSignature, payloadBytes, pqSigningPublicKey);
+    return verifyWithBundle(true);
   },
 
   async unwrapDeviceMessageKey(parsedPayload) {
@@ -2701,7 +2753,7 @@ const cryptoService = {
 
     await Promise.all(
       normalizedUserIds.map(async (userId) => {
-        const deviceBundles = await this.fetchUserDeviceBundles(userId);
+        const deviceBundles = await this.fetchUserDeviceBundles(userId, { refresh: true });
         const hasDeviceKeys = deviceBundles.some(
           (device) => device?.keyBundle?.encryptionPublicKey
         );
@@ -2753,11 +2805,15 @@ const cryptoService = {
     let sessionState = await this.loadSessionState(remoteUserId, remoteDevice.deviceId);
     let mode = 'session';
     let preKey = null;
+    const remoteFingerprint = this.getDeviceBundleFingerprint(remoteDevice);
     const minimumProtocolVersion = this.deviceSupportsPostQuantumHandshake(remoteDevice)
       ? DIRECT_SESSION_PAYLOAD_VERSION
       : CLASSICAL_DIRECT_SESSION_PAYLOAD_VERSION;
 
-    if (sessionState?.protocolVersion < minimumProtocolVersion) {
+    if (
+      sessionState?.protocolVersion < minimumProtocolVersion
+      || (sessionState && remoteFingerprint && sessionState.remoteFingerprint !== remoteFingerprint)
+    ) {
       sessionState = null;
     }
 
@@ -2770,7 +2826,10 @@ const cryptoService = {
     }
 
     const encryptedEnvelope = await this.encryptWithDirectSession(sessionState, plaintextBytes, remoteDevice);
-    await this.persistSessionState(remoteUserId, remoteDevice.deviceId, encryptedEnvelope.nextSessionState);
+    await this.persistSessionState(remoteUserId, remoteDevice.deviceId, {
+      ...encryptedEnvelope.nextSessionState,
+      remoteFingerprint
+    });
 
     return {
       userId: normalizeId(remoteUserId),
@@ -2780,6 +2839,7 @@ const cryptoService = {
       counter: encryptedEnvelope.counter,
       nonce: encryptedEnvelope.nonce,
       ciphertext: encryptedEnvelope.ciphertext,
+      ratchet: encryptedEnvelope.ratchet,
       preKey
     };
   },
@@ -2825,7 +2885,10 @@ const cryptoService = {
     await this.persistSessionState(
       parsedPayload.senderUserId,
       parsedPayload.senderDeviceId,
-      decryptedEnvelope.nextSessionState
+      {
+        ...decryptedEnvelope.nextSessionState,
+        remoteFingerprint: parsedPayload.senderFingerprint || null
+      }
     );
     this.rememberDirectEnvelopePayload(cacheKey, decryptedEnvelope.plaintext);
 
@@ -2942,21 +3005,9 @@ const cryptoService = {
 
   async encryptTextForUsers(plaintext, userIds = []) {
     try {
-      if (this.isDirectSessionUserSet(userIds)) {
-        return await this.encryptTextForDirectSession(plaintext, userIds);
-      }
-
       return await this.encryptTextForUsersV2(plaintext, userIds);
     } catch (deviceEncryptionError) {
-      if (this.isDirectSessionUserSet(userIds)) {
-        try {
-          return await this.encryptTextForUsersV2(plaintext, userIds);
-        } catch (sealedBoxError) {
-          console.warn('Direct session encryption is unavailable; using legacy account-key encryption:', sealedBoxError);
-        }
-      } else {
-        console.warn('Device encryption is unavailable; using legacy account-key encryption:', deviceEncryptionError);
-      }
+      console.warn('Device encryption is unavailable; using legacy account-key encryption:', deviceEncryptionError);
 
       const { aesKey, envelopes } = await this.buildEnvelopeContext(userIds);
       const encrypted = await this.encryptBytes(aesKey, textEncoder.encode(plaintext));
@@ -3002,21 +3053,9 @@ const cryptoService = {
 
   async encryptAttachmentForUsers(file, userIds = []) {
     try {
-      if (this.isDirectSessionUserSet(userIds)) {
-        return await this.encryptAttachmentForDirectSession(file, userIds);
-      }
-
       return await this.encryptAttachmentForUsersV2(file, userIds);
     } catch (deviceEncryptionError) {
-      if (this.isDirectSessionUserSet(userIds)) {
-        try {
-          return await this.encryptAttachmentForUsersV2(file, userIds);
-        } catch (sealedBoxError) {
-          console.warn('Direct attachment encryption is unavailable; using legacy account-key encryption:', sealedBoxError);
-        }
-      } else {
-        console.warn('Device attachment encryption is unavailable; using legacy account-key encryption:', deviceEncryptionError);
-      }
+      console.warn('Device attachment encryption is unavailable; using legacy account-key encryption:', deviceEncryptionError);
 
       const { aesKey, envelopes } = await this.buildEnvelopeContext(userIds);
       const metadata = await buildEncryptedAttachmentMetadata(file);

@@ -28,15 +28,13 @@ router.get('/health', async (req, res) => {
 
 router.get('/health/ready', async (req, res) => {
   const mongoReady = isDatabaseReady();
-  const cacheStatus = cacheService.getStatus();
-  const redisReady = !cacheStatus.redis.configured || cacheStatus.redis.connected;
 
-  if (mongoReady && redisReady) {
+  if (mongoReady) {
     res.status(200).json({ status: 'ready' });
   } else {
     res.status(503).json({
       status: 'not ready',
-      reason: !mongoReady ? 'MongoDB not connected' : 'Redis not connected',
+      reason: 'MongoDB not connected',
       mongodb: getDatabaseStatus()
     });
   }

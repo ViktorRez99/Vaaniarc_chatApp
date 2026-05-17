@@ -6,6 +6,30 @@ import {
   isImageAttachmentMetadata
 } from '../utils/attachmentPreview';
 
+export const getAttachmentDetails = (message) => (
+  message?.decryptedFileMetadata
+  || message?.content?.file?.decryptedMetadata
+  || message?.content?.file
+  || message?.fileMetadata
+  || null
+);
+
+export const hasRenderableAttachment = (message) => {
+  const fileDetails = getAttachmentDetails(message);
+
+  return Boolean(
+    message?.localAttachmentPreviewUrl
+    || message?.fileUrl
+    || fileDetails?.url
+    || fileDetails?.filename
+    || fileDetails?.originalName
+    || fileDetails?.mimetype
+    || fileDetails?.size
+    || fileDetails?.encryptionPayload
+    || fileDetails?.preview
+  );
+};
+
 const buildAspectRatio = (preview) => {
   const width = Number(preview?.width || 0);
   const height = Number(preview?.height || 0);
@@ -63,13 +87,7 @@ const MessageAttachmentCard = ({
   isOwn = false,
   onDownload = null
 }) => {
-  const fileDetails = (
-    message?.decryptedFileMetadata
-    || message?.content?.file?.decryptedMetadata
-    || message?.content?.file
-    || message?.fileMetadata
-    || null
-  );
+  const fileDetails = getAttachmentDetails(message);
   const localPreviewUrl = message?.localAttachmentPreviewUrl || null;
   const preview = fileDetails?.preview || null;
   const isImage = Boolean(localPreviewUrl || isImageAttachmentMetadata(fileDetails));

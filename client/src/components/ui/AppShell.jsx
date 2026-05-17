@@ -32,7 +32,7 @@ const AppShell = ({ children, sidebar }) => {
   const activeItem = railItems.find((item) => {
     if (item.id === 'chats' && location.pathname === '/chat' && !location.search) return true;
     if (item.id === 'groups' && location.search === '?tab=groups') return true;
-    if (item.id === 'calls' && location.search === '?tab=meetings') return true;
+    if (item.id === 'calls' && (location.search === '?tab=meetings' || location.pathname.startsWith('/meeting'))) return true;
     return false;
   }) || railItems[0];
 

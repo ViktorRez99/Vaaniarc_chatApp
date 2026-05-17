@@ -62,6 +62,15 @@ const emitPrivateMessageEvent = (req, chat, eventName, payload) => {
   });
 };
 
+const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(String(value || ''));
+
+const isClientDataError = (error) => (
+  error?.name === 'CastError'
+  || error?.name === 'ValidationError'
+  || String(error?.message || '').toLowerCase().includes('disappearing timer')
+  || String(error?.message || '').toLowerCase().includes('plaintext content')
+);
+
 // Get all chats for the authenticated user
 router.get('/chats', async (req, res) => {
   try {
@@ -371,6 +380,11 @@ router.post('/chats/:chatId/messages', async (req, res) => {
       forwardedFrom
     } = req.body;
     const userId = req.user._id;
+
+    if (!isValidObjectId(chatId)) {
+      return res.status(400).json({ message: 'Invalid chat id.' });
+    }
+
     if (messageType === 'text' && !encryptedContent) {
       return res.status(400).json({ message: 'Encrypted content is required for direct messages.' });
     }
@@ -406,8 +420,9 @@ router.post('/chats/:chatId/messages', async (req, res) => {
       return res.status(400).json({ message: payloadValidation.error });
     }
 
+    let authorizedTargetDeviceIds = [];
     if (protocolVersion >= 2) {
-      const authorizedTargetDeviceIds = await resolveAuthorizedDeviceIds({
+      authorizedTargetDeviceIds = await resolveAuthorizedDeviceIds({
         userIds: chat.participants,
         deviceIds: targetDeviceIds
       });
@@ -418,6 +433,10 @@ router.post('/chats/:chatId/messages', async (req, res) => {
     }
 
     if (replyTo) {
+      if (!isValidObjectId(replyTo)) {
+        return res.status(400).json({ message: 'Invalid reply target id.' });
+      }
+
       const replyMessage = await PrivateMessage.findOne({ _id: replyTo, chatId });
       if (!replyMessage) {
         return res.status(404).json({ message: 'Reply target not found in this chat' });
@@ -455,7 +474,7 @@ router.post('/chats/:chatId/messages', async (req, res) => {
       messageType,
       fileUrl,
       replyTo: replyTo || null,
-      forwardedFrom: normalizedForwardedFrom,
+      ...(normalizedForwardedFrom ? { forwardedFrom: normalizedForwardedFrom } : {}),
       ...privacyFields
     });
 
@@ -470,36 +489,37 @@ router.post('/chats/:chatId/messages', async (req, res) => {
 
     const outgoingMessage = message.toObject();
     const io = req.app.get('io');
-    if (io) {
-      if (protocolVersion >= 2) {
-        emitToDeviceRooms({
-          io,
-          eventName: 'private_message',
-          payload: outgoingMessage,
-          deviceIds: targetDeviceIds
-        });
-      } else {
-        emitPrivateMessageEvent(req, chat, 'private_message', outgoingMessage);
-      }
+    try {
+      if (io) {
+        if (protocolVersion >= 2) {
+          emitToDeviceRooms({
+            io,
+            eventName: 'private_message',
+            payload: outgoingMessage,
+            deviceIds: authorizedTargetDeviceIds
+          });
+        } else {
+          emitPrivateMessageEvent(req, chat, 'private_message', outgoingMessage);
+        }
 
-      enqueueBackgroundJob('push-direct-message-notifications', () => sendNotificationsToUserIds({
-        io,
-        userIds: chat.participants,
-        excludeUserIds: [userId],
-        payloadBuilder: () => buildDirectMessagePayload({
-          sender: req.user,
-          message: outgoingMessage
-        })
-      }));
+        enqueueBackgroundJob('push-direct-message-notifications', () => sendNotificationsToUserIds({
+          io,
+          userIds: chat.participants,
+          excludeUserIds: [userId],
+          payloadBuilder: () => buildDirectMessagePayload({
+            sender: req.user,
+            message: outgoingMessage
+          })
+        }));
+      }
+    } catch (deliveryError) {
+      logger.error('Private message delivery fanout failed:', deliveryError);
     }
 
     res.status(201).json(serializePrivateMessageForUser(message, userId));
   } catch (error) {
     logger.error('Error sending message:', error);
-    if (String(error.message || '').toLowerCase().includes('plaintext content')) {
-      return res.status(400).json({ message: error.message });
-    }
-    if (String(error.message || '').toLowerCase().includes('disappearing timer')) {
+    if (isClientDataError(error)) {
       return res.status(400).json({ message: error.message });
     }
     res.status(500).json({ message: error.message || 'Failed to send message' });

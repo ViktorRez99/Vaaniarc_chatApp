@@ -21,15 +21,17 @@ import { useAuth } from '../context/AuthContext';
 import api from '../services/api';
 import socketService from '../services/socket';
 import cryptoService from '../services/cryptoService';
-import MessageAttachmentCard from './MessageAttachmentCard';
+import MessageAttachmentCard, { hasRenderableAttachment } from './MessageAttachmentCard';
 import ForwardMessageDialog from './ForwardMessageDialog';
 import { idsEqual, normalizeId } from '../utils/identity';
 import {
   buildForwardedFromPayload,
   getForwardPreviewText,
+  getForwardedFromLabel,
   getMessageSenderName,
   getMessageTextContent,
   isForwardablePlaintextMessage,
+  isForwardedMessage,
   mergePinnedMessage,
   sortPinnedMessages
 } from '../utils/messageForwarding';
@@ -1074,12 +1076,7 @@ const RoomsPage = () => {
                 && message.messageType === 'text'
                 && !message.isDeleted;
               const canDeleteMessage = (isOwn || isModerator) && !message.isDeleted;
-              const hasAttachment = Boolean(
-                message?.content?.file?.url
-                || message?.fileUrl
-                || message?.decryptedFileMetadata
-                || message?.content?.file
-              );
+              const hasAttachment = hasRenderableAttachment(message);
 
               return (
                 <div
@@ -1091,7 +1088,7 @@ const RoomsPage = () => {
                       ? 'bg-accent/[0.12] text-tx-primary rounded-br-md border border-accent/10'
                       : 'bg-white/[0.05] text-tx-primary rounded-bl-md border border-white/[0.06]'
                   }`}>
-                    {(message.isPinned || message.forwardedFrom) && (
+                    {(message.isPinned || isForwardedMessage(message)) && (
                       <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-wide text-white/60">
                         {message.isPinned && (
                           <span className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1">
@@ -1099,10 +1096,10 @@ const RoomsPage = () => {
                             Pinned
                           </span>
                         )}
-                        {message.forwardedFrom && (
+                        {isForwardedMessage(message) && (
                           <span className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1">
                             <Forward className="h-3 w-3" />
-                            Forwarded from {message.forwardedFrom?.originalSenderName || message.forwardedFrom?.originalSender?.username || 'Unknown'}
+                            Forwarded from {getForwardedFromLabel(message)}
                           </span>
                         )}
                       </div>

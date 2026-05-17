@@ -1,29 +1,33 @@
-import { Fragment, useState, useEffect, useRef } from 'react';
+import { Fragment, useState, useEffect, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { 
-  Search, Plus, Send, Paperclip, Smile, MoreVertical, 
+import {
+  Search, Plus, Send, Paperclip, Smile, MoreVertical,
   Phone, Video, Info, ArrowLeft, Check, CheckCheck,
   Image as ImageIcon, Mic, X, MessageCircle, Zap,
   Reply, Pencil, Trash2, Pin, Forward, FileText, Users,
-  Lock, AlertCircle, Archive, Inbox, RefreshCw
+  Lock, AlertCircle, Archive, Inbox, RefreshCw,
+  Play, Pause, Trash, Square
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useCall } from '../context/CallContext';
 import socketService from '../services/socket';
 import api from '../services/api';
 import cryptoService from '../services/cryptoService';
 import UserProfile from './UserProfile';
 import RoomsPage from './RoomsPage';
 import ChannelsPage from './ChannelsPage';
-import MessageAttachmentCard from './MessageAttachmentCard';
+import MessageAttachmentCard, { hasRenderableAttachment } from './MessageAttachmentCard';
 import ForwardMessageDialog from './ForwardMessageDialog';
 import { toast } from './ui/Toaster';
 import { idsEqual, normalizeId } from '../utils/identity';
 import {
   buildForwardedFromPayload,
   getForwardPreviewText,
+  getForwardedFromLabel,
   getMessageSenderName,
   getMessageTextContent,
   isForwardablePlaintextMessage,
+  isForwardedMessage,
   mergePinnedMessage,
   sortPinnedMessages
 } from '../utils/messageForwarding';
@@ -36,6 +40,7 @@ import {
 
 const ChatsPage = () => {
   const { user, encryptionState } = useAuth();
+  const { startPrivateCall, isInCall, isStartingCall } = useCall();
   const [chats, setChats] = useState([]);
   const [activeMode, setActiveMode] = useState('direct');
   const [selectedChat, setSelectedChat] = useState(null);
@@ -59,6 +64,17 @@ const ChatsPage = () => {
   const [editingMessage, setEditingMessage] = useState(null);
   const [pinnedMessages, setPinnedMessages] = useState([]);
   const [forwardingMessage, setForwardingMessage] = useState(null);
+  const [activeMessageMenuId, setActiveMessageMenuId] = useState(null);
+  const [showNewMessageIndicator, setShowNewMessageIndicator] = useState(false);
+
+  // Voice recording state
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
+  const [voiceRecordingTime, setVoiceRecordingTime] = useState(0);
+  const [voiceRecordingBlob, setVoiceRecordingBlob] = useState(null);
+  const [voiceRecordingUrl, setVoiceRecordingUrl] = useState(null);
+  const [isPlayingVoicePreview, setIsPlayingVoicePreview] = useState(false);
+
+  // Refs
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const selectedChatRef = useRef(null);
@@ -68,14 +84,21 @@ const ChatsPage = () => {
   const voiceChunksRef = useRef([]);
   const voiceStreamRef = useRef(null);
   const voiceStartedAtRef = useRef(null);
+  const voiceRecordingIntervalRef = useRef(null);
+  const voicePreviewAudioRef = useRef(null);
   const chatsRef = useRef([]);
   const socketHandlersRef = useRef({});
   const socketListenerRefs = useRef(new Map());
   const uiTimeoutRefs = useRef(new Set());
+  const processedMessageIdsRef = useRef(new Set());
+  const messagesContainerRef = useRef(null);
+  const selectedChatIdRef = useRef(null);
+  const loadedMessagesChatIdRef = useRef(null);
+  const pendingInitialScrollChatIdRef = useRef(null);
+  const initialScrollDoneChatIdRef = useRef(null);
+  const pendingBottomScrollBehaviorRef = useRef(null);
   const currentUserId = normalizeId(user?._id || user?.id);
   const encryptionBlocked = encryptionState?.status !== 'ready';
-  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
-  const [voiceStartedAt, setVoiceStartedAt] = useState(null);
 
   const showChatError = (title, description) => {
     toast({
@@ -86,7 +109,7 @@ const ChatsPage = () => {
   };
 
   const normalizeSendError = (error) => {
-    const message = String(error?.message || error || '');
+    const message = String(error?.responseBody?.message || error?.message || error || '');
     if (/recipient has not set up encryption yet/i.test(message)) {
       return 'This user has not set up encryption yet. They need to log in before you can message them.';
     }
@@ -96,7 +119,82 @@ const ChatsPage = () => {
     if (/encryption identity is not ready/i.test(message)) {
       return 'Your encryption keys are not ready. Please refresh the page and try again.';
     }
+    if (/sender device does not match|current sender device|registered device ID|required for v2 encrypted payloads/i.test(message)) {
+      return 'This browser device changed during encryption setup. The app refreshed your keys; try sending again.';
+    }
+    if (/unauthorized target devices|targets unauthorized devices|does not include the current sender device|does not contain any target devices/i.test(message)) {
+      return 'The device list changed while sending. The app refreshed encryption keys; try sending again.';
+    }
     return message || 'Failed to send message.';
+  };
+
+  const isEncryptedPayloadRejection = (error) => {
+    const message = String(error?.responseBody?.message || error?.message || '');
+
+    return error?.statusCode === 400 && /encrypted payload|sender device|target devices|current sender device|registered device ID|device list/i.test(message);
+  };
+
+  const isTransportSendFailure = (error) => (
+    error?.category === 'network'
+    || error?.category === 'server'
+    || error?.statusCode >= 500
+  );
+
+  const encryptTextForCurrentDevice = async (content, participantIds) => {
+    let encryptedContent = await cryptoService.encryptTextForUsers(content, participantIds);
+
+    if (cryptoService.isPayloadBoundToCurrentDevice(encryptedContent)) {
+      return encryptedContent;
+    }
+
+    cryptoService.clearDeviceBundleCache(participantIds);
+    await cryptoService.ensureIdentity(user);
+    encryptedContent = await cryptoService.encryptTextForUsers(content, participantIds);
+
+    if (!cryptoService.isPayloadBoundToCurrentDevice(encryptedContent)) {
+      throw new Error('The encrypted payload does not include the current sender device.');
+    }
+
+    return encryptedContent;
+  };
+
+  const sendEncryptedTextMessage = async ({
+    chatId,
+    content,
+    participantIds,
+    tempId,
+    expiresInSeconds,
+    replyToId
+  }) => {
+    let encryptedContent = await encryptTextForCurrentDevice(content, participantIds);
+    const buildPayload = () => ({
+      content: cryptoService.encryptedPlaceholder,
+      encryptedContent,
+      messageType: 'text',
+      expiresInSeconds,
+      tempId,
+      replyTo: replyToId || null
+    });
+
+    try {
+      return await api.sendChatMessage(chatId, buildPayload());
+    } catch (error) {
+      if (!isEncryptedPayloadRejection(error)) {
+        error.encryptedContent = encryptedContent;
+        throw error;
+      }
+
+      cryptoService.clearDeviceBundleCache(participantIds);
+      await cryptoService.ensureIdentity(user);
+      encryptedContent = await encryptTextForCurrentDevice(content, participantIds);
+
+      try {
+        return await api.sendChatMessage(chatId, buildPayload());
+      } catch (retryError) {
+        retryError.encryptedContent = encryptedContent;
+        throw retryError;
+      }
+    }
   };
 
   const scheduleUiTimeout = (callback, delay) => {
@@ -106,6 +204,52 @@ const ChatsPage = () => {
     }, delay);
     uiTimeoutRefs.current.add(timeoutId);
     return timeoutId;
+  };
+
+  const isMessageListNearBottom = (threshold = 160) => {
+    const container = messagesContainerRef.current;
+    if (!container) {
+      return true;
+    }
+
+    return container.scrollHeight - container.scrollTop - container.clientHeight <= threshold;
+  };
+
+  const scrollToBottom = (behavior = 'smooth') => {
+    const scheduleFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame.bind(window)
+      : (callback) => setTimeout(callback, 0);
+
+    scheduleFrame(() => {
+      scheduleFrame(() => {
+        const container = messagesContainerRef.current;
+        if (container) {
+          container.scrollTop = container.scrollHeight;
+        }
+        messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' });
+        setShowNewMessageIndicator(false);
+      });
+    });
+  };
+
+  const queueBottomScroll = (behavior = 'smooth') => {
+    pendingBottomScrollBehaviorRef.current = behavior;
+    setShowNewMessageIndicator(false);
+  };
+
+  const queueNewMessageScroll = () => {
+    if (isMessageListNearBottom()) {
+      queueBottomScroll('smooth');
+      return;
+    }
+
+    setShowNewMessageIndicator(true);
+  };
+
+  const handleMessagesScroll = () => {
+    if (isMessageListNearBottom()) {
+      setShowNewMessageIndicator(false);
+    }
   };
   
   // Keep the ref in sync with state
@@ -120,11 +264,15 @@ const ChatsPage = () => {
   // Register the page-level socket listeners once against the shared socket service.
   useEffect(() => {
     setupSocketListeners();
-    
+
     return () => {
       if (typingTimeoutRef.current) {
         clearTimeout(typingTimeoutRef.current);
         typingTimeoutRef.current = null;
+      }
+      if (voiceRecordingIntervalRef.current) {
+        clearInterval(voiceRecordingIntervalRef.current);
+        voiceRecordingIntervalRef.current = null;
       }
       if (voiceRecorderRef.current?.state === 'recording') {
         voiceRecorderRef.current.ondataavailable = null;
@@ -133,6 +281,13 @@ const ChatsPage = () => {
       }
       voiceStreamRef.current?.getTracks?.().forEach((track) => track.stop());
       voiceStreamRef.current = null;
+      if (voiceRecordingUrl) {
+        URL.revokeObjectURL(voiceRecordingUrl);
+      }
+      if (voicePreviewAudioRef.current) {
+        voicePreviewAudioRef.current.pause();
+        voicePreviewAudioRef.current = null;
+      }
       uiTimeoutRefs.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
       uiTimeoutRefs.current.clear();
       cleanupSocketListeners();
@@ -183,13 +338,33 @@ const ChatsPage = () => {
   }, [searchQuery]);
 
   useEffect(() => {
-    if (!selectedChat?._id) {
+    const nextChatId = normalizeId(selectedChat?._id);
+
+    if (!nextChatId) {
+      selectedChatIdRef.current = null;
+      loadedMessagesChatIdRef.current = null;
+      pendingInitialScrollChatIdRef.current = null;
+      initialScrollDoneChatIdRef.current = null;
+      pendingBottomScrollBehaviorRef.current = null;
+      setShowNewMessageIndicator(false);
       setMessages([]);
       setPinnedMessages([]);
       return;
     }
 
+    if (!idsEqual(selectedChatIdRef.current, nextChatId)) {
+      selectedChatIdRef.current = nextChatId;
+      loadedMessagesChatIdRef.current = null;
+      pendingInitialScrollChatIdRef.current = nextChatId;
+      initialScrollDoneChatIdRef.current = null;
+      pendingBottomScrollBehaviorRef.current = null;
+      setShowNewMessageIndicator(false);
+    }
+
     if (selectedChat.suppressInitialHistory) {
+      loadedMessagesChatIdRef.current = nextChatId;
+      pendingInitialScrollChatIdRef.current = null;
+      initialScrollDoneChatIdRef.current = nextChatId;
       setPinnedMessages([]);
       return;
     }
@@ -197,15 +372,58 @@ const ChatsPage = () => {
     fetchMessages(selectedChat._id);
     fetchPinnedMessages(selectedChat._id);
     markMessagesAsRead(selectedChat._id);
-  }, [selectedChat]);
+  }, [selectedChat?._id, selectedChat?.suppressInitialHistory, currentUserId]);
 
   useEffect(() => {
-    scrollToBottom();
+    const activeChatId = normalizeId(selectedChatRef.current?._id);
+    const loadedChatId = loadedMessagesChatIdRef.current;
+
+    if (!activeChatId || (loadedChatId && !idsEqual(loadedChatId, activeChatId))) {
+      return;
+    }
+
+    if (
+      pendingInitialScrollChatIdRef.current
+      && idsEqual(pendingInitialScrollChatIdRef.current, activeChatId)
+      && !idsEqual(initialScrollDoneChatIdRef.current, activeChatId)
+    ) {
+      pendingInitialScrollChatIdRef.current = null;
+      initialScrollDoneChatIdRef.current = activeChatId;
+      pendingBottomScrollBehaviorRef.current = null;
+      scrollToBottom('auto');
+      return;
+    }
+
+    if (pendingBottomScrollBehaviorRef.current) {
+      const behavior = pendingBottomScrollBehaviorRef.current;
+      pendingBottomScrollBehaviorRef.current = null;
+      scrollToBottom(behavior);
+    }
   }, [messages]);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  // Close message action menu when clicking outside
+  useEffect(() => {
+    if (!activeMessageMenuId) return undefined;
+    const handleOutsideClick = (event) => {
+      if (event.target.closest('[data-message-menu="true"]')) return;
+      if (event.target.closest('[data-message-bubble="true"]')) return;
+      setActiveMessageMenuId(null);
+    };
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') setActiveMessageMenuId(null);
+    };
+    document.addEventListener('mousedown', handleOutsideClick);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [activeMessageMenuId]);
+
+  // Close menu when switching chats
+  useEffect(() => {
+    setActiveMessageMenuId(null);
+  }, [selectedChat]);
 
   const shouldShowDateSeparator = (currentMessage, previousMessage) => {
     if (!currentMessage?.createdAt) {
@@ -251,6 +469,16 @@ const ChatsPage = () => {
       const response = await api.get(`/chats${showArchived ? '?archived=true' : ''}`);
       const nextChats = await cryptoService.hydratePrivateChats(Array.isArray(response) ? response : []);
       setChats(nextChats);
+      setSelectedChat(current => {
+        if (!current?._id) return current;
+        const fresh = nextChats.find(c => idsEqual(c._id, current._id));
+        if (!fresh) return current;
+        // Preserve suppressInitialHistory flag and any in-memory fields
+        if (current.suppressInitialHistory) {
+          return { ...fresh, suppressInitialHistory: true };
+        }
+        return fresh;
+      });
     } catch (error) {
       console.error('Error fetching chats:', error);
       setChats([]);
@@ -262,12 +490,16 @@ const ChatsPage = () => {
       return;
     }
 
+    const normalizedChatId = normalizeId(chatId);
+
     try {
       const response = await api.get(`/chats/${chatId}/messages`);
       const nextMessages = await cryptoService.hydratePrivateMessages(Array.isArray(response) ? response : []);
+      loadedMessagesChatIdRef.current = normalizedChatId;
       setMessages(nextMessages);
     } catch (error) {
       console.error('Error fetching messages:', error);
+      loadedMessagesChatIdRef.current = normalizedChatId;
       setMessages([]);
     }
   };
@@ -301,6 +533,8 @@ const ChatsPage = () => {
       ['user_typing', 'handleUserTyping'],
       ['user_stop_typing', 'handleUserStopTyping'],
       ['messages_read', 'handleMessagesRead'],
+      ['user_online', 'handleUserOnline'],
+      ['user_offline', 'handleUserOffline'],
       ['call_request_sent', 'handleCallRequestSent'],
       ['incoming_call', 'handleIncomingCall'],
       ['private_message_reaction', 'handlePrivateMessageReaction'],
@@ -366,91 +600,100 @@ const ChatsPage = () => {
 
   const handleNewMessage = async (incomingMessage) => {
     const message = await cryptoService.hydratePrivateMessage(incomingMessage);
-    // This handler now only receives messages from OTHER users
+    const messageId = normalizeId(message._id || message.__id);
+    const tempId = message.tempId || null;
+
+    const alreadyProcessed = (messageId && processedMessageIdsRef.current.has(messageId))
+      || (tempId && processedMessageIdsRef.current.has(tempId));
+    if (messageId) processedMessageIdsRef.current.add(messageId);
+    if (tempId) processedMessageIdsRef.current.add(tempId);
+
     const messageChatId = normalizeId(message.chatId);
     const currentSelectedChat = selectedChatRef.current;
     const selectedChatId = normalizeId(currentSelectedChat?._id);
-    
-    if (currentSelectedChat && idsEqual(messageChatId, selectedChatId)) {
-      setMessages(prev => {
-        const optimisticIndex = prev.findIndex((entry) => (
-          entry.isOptimistic && entry.tempId && message.tempId && entry.tempId === message.tempId
-        ));
-        if (optimisticIndex !== -1) {
-          const updated = [...prev];
-          updated[optimisticIndex] = { ...message, isOptimistic: false };
-          return updated;
-        }
+    const chatExists = chatsRef.current.some((chat) => idsEqual(chat._id, messageChatId));
 
-        // Check if message already exists to prevent duplicates
-        const exists = prev.some(m => m._id === message._id);
-        if (exists) return prev;
-        
-        return [...prev, message];
-      });
-      
-      // Mark as read since we're viewing this chat
-      markMessagesAsRead(currentSelectedChat._id);
+    if (!alreadyProcessed) {
+      if (currentSelectedChat && idsEqual(messageChatId, selectedChatId)) {
+        queueNewMessageScroll();
+        setMessages(prev => {
+          const optimisticIndex = prev.findIndex((entry) => (
+            entry.isOptimistic && entry.tempId && tempId && entry.tempId === tempId
+          ));
+          if (optimisticIndex !== -1) {
+            const updated = [...prev];
+            updated[optimisticIndex] = { ...message, isOptimistic: false };
+            return updated;
+          }
+
+          const exists = prev.some(m => idsEqual(m._id, message._id));
+          if (exists) return prev;
+
+          return [...prev, message];
+        });
+
+        markMessagesAsRead(currentSelectedChat._id);
+      }
     }
-    
-    // Update chat list
+
     setChats(prev => {
       const updated = prev.map(chat => {
-        const chatId = chat._id?.toString() || chat._id;
+        const chatId = normalizeId(chat._id);
         if (idsEqual(chatId, messageChatId)) {
-          return { ...chat, lastMessage: message, updatedAt: new Date() };
+          return { ...chat, lastMessage: message, updatedAt: message.createdAt || new Date().toISOString() };
         }
         return chat;
       });
-      return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+      return updated.sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
     });
+
+    if (!chatExists) {
+      fetchChats();
+    }
   };
 
   // Handle confirmation of our own sent message
   const handleMessageSent = async (incomingMessage) => {
     const message = await cryptoService.hydratePrivateMessage(incomingMessage);
+    const messageId = normalizeId(message._id || message.__id);
+    const tempId = message.tempId || null;
+
+    const alreadyProcessed = (messageId && processedMessageIdsRef.current.has(messageId))
+      || (tempId && processedMessageIdsRef.current.has(tempId));
+    if (messageId) processedMessageIdsRef.current.add(messageId);
+    if (tempId) processedMessageIdsRef.current.add(tempId);
+
     const messageChatId = normalizeId(message.chatId);
     const currentSelectedChat = selectedChatRef.current;
     const selectedChatId = normalizeId(currentSelectedChat?._id);
     
-    if (currentSelectedChat && idsEqual(messageChatId, selectedChatId)) {
-      setMessages(prev => {
-        // Prefer matching by tempId when present to avoid content collisions
-        const optimisticIndexByTemp = prev.findIndex(m => m.isOptimistic && m.tempId && m.tempId === message.tempId);
-        if (optimisticIndexByTemp !== -1) {
-          const updated = [...prev];
-          updated[optimisticIndexByTemp] = { ...message, isOptimistic: false };
-          return updated;
-        }
+    if (!alreadyProcessed) {
+      if (currentSelectedChat && idsEqual(messageChatId, selectedChatId)) {
+        queueBottomScroll('smooth');
+        setMessages(prev => {
+          const optimisticIndexByTemp = prev.findIndex(m => m.isOptimistic && m.tempId && m.tempId === tempId);
+          if (optimisticIndexByTemp !== -1) {
+            const updated = [...prev];
+            updated[optimisticIndexByTemp] = { ...message, isOptimistic: false };
+            return updated;
+          }
 
-        // Fallback: match by identical content (legacy)
-        const optimisticIndexByContent = prev.findIndex(m => m.isOptimistic && m.content === message.content);
-        if (optimisticIndexByContent !== -1) {
-          const updated = [...prev];
-          updated[optimisticIndexByContent] = { ...message, isOptimistic: false };
-          return updated;
-        }
-        
-        // If no optimistic message found, check if it already exists
-        const exists = prev.some(m => m._id === message._id);
-        if (exists) return prev;
-        
-        // Add the message if it doesn't exist
-        return [...prev, { ...message, isOptimistic: false }];
-      });
+          const optimisticIndexByContent = prev.findIndex(m => m.isOptimistic && m.content === message.content);
+          if (optimisticIndexByContent !== -1) {
+            const updated = [...prev];
+            updated[optimisticIndexByContent] = { ...message, isOptimistic: false };
+            return updated;
+          }
+
+          const exists = prev.some(m => idsEqual(m._id, message._id));
+          if (exists) return prev;
+
+          return [...prev, { ...message, isOptimistic: false }];
+        });
+      }
     }
     
-    // Update chat list with the sent message
-    setChats(prev => {
-      const updated = prev.map(chat => {
-        const chatId = chat._id?.toString() || chat._id;
-        if (idsEqual(chatId, messageChatId)) {
-          return { ...chat, lastMessage: message, updatedAt: new Date() };
-        }
-        return chat;
-      });
-      return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-    });
+    moveChatToTop(messageChatId, message, message.createdAt || message.updatedAt);
   };
 
   const handleUserTyping = ({ chatId, username }) => {
@@ -489,16 +732,126 @@ const ChatsPage = () => {
       }));
     }
 
-    // Also update chat list lastMessage read state
     setChats(prev => prev.map(chat => {
       if (!idsEqual(chat._id, chatId)) return chat;
       if (!chat.lastMessage) return chat;
-      if (idsEqual(chat.lastMessage.sender, user?._id || user?.id)) {
+      const senderId = typeof chat.lastMessage.sender === 'object'
+        ? chat.lastMessage.sender?._id
+        : chat.lastMessage.sender;
+      if (idsEqual(senderId, user?._id || user?.id)) {
         return { ...chat, lastMessage: { ...chat.lastMessage, read: true, readAt: new Date() } };
       }
       return chat;
     }));
   };
+
+  const handleUserOnline = ({ userId }) => {
+    const normalizedId = normalizeId(userId);
+    setUsers(prev => prev.map(u =>
+      idsEqual(u._id, normalizedId) ? { ...u, status: 'online' } : u
+    ));
+    setChats(prev => prev.map(chat => {
+      const other = chat.participants?.find(p =>
+        idsEqual(typeof p === 'object' ? p._id || p.id : p, normalizedId)
+      );
+      if (!other) return chat;
+      return {
+        ...chat,
+        participants: chat.participants?.map(p => {
+          if (typeof p === 'object' && idsEqual(p._id || p.id, normalizedId)) {
+            return { ...p, status: 'online' };
+          }
+          return p;
+        })
+      };
+    }));
+    setSelectedUser(prev => {
+      if (prev && idsEqual(prev._id || prev.id, normalizedId)) {
+        return { ...prev, status: 'online' };
+      }
+      return prev;
+    });
+  };
+
+  const handleUserOffline = ({ userId }) => {
+    const normalizedId = normalizeId(userId);
+    setUsers(prev => prev.map(u =>
+      idsEqual(u._id, normalizedId) ? { ...u, status: 'offline' } : u
+    ));
+    setChats(prev => prev.map(chat => {
+      const other = chat.participants?.find(p =>
+        idsEqual(typeof p === 'object' ? p._id || p.id : p, normalizedId)
+      );
+      if (!other) return chat;
+      return {
+        ...chat,
+        participants: chat.participants?.map(p => {
+          if (typeof p === 'object' && idsEqual(p._id || p.id, normalizedId)) {
+            return { ...p, status: 'offline' };
+          }
+          return p;
+        })
+      };
+    }));
+    setSelectedUser(prev => {
+      if (prev && idsEqual(prev._id || prev.id, normalizedId)) {
+        return { ...prev, status: 'offline' };
+      }
+      return prev;
+    });
+  };
+
+  const moveChatToTop = useCallback((chatId, lastMessage, updatedAt) => {
+    setChats(prev => {
+      const idx = prev.findIndex(c => idsEqual(c._id, chatId));
+      const resolvedUpdatedAt = updatedAt || new Date().toISOString();
+      if (idx === -1) return prev;
+      const updated = [...prev];
+      updated[idx] = {
+        ...updated[idx],
+        lastMessage: lastMessage || updated[idx].lastMessage,
+        updatedAt: resolvedUpdatedAt
+      };
+      updated.sort((a, b) =>
+        new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0)
+      );
+      return updated;
+    });
+  }, []);
+
+  const addOrUpdateChatInList = useCallback((chatId, lastMessage, updatedAt, chatData) => {
+    setChats(prev => {
+      const idx = prev.findIndex(c => idsEqual(c._id, chatId));
+      const resolvedUpdatedAt = updatedAt || lastMessage?.createdAt || new Date().toISOString();
+
+      if (idx !== -1) {
+        const updated = [...prev];
+        updated[idx] = {
+          ...updated[idx],
+          ...(chatData || {}),
+          lastMessage: lastMessage || updated[idx].lastMessage,
+          updatedAt: resolvedUpdatedAt
+        };
+        updated.sort((a, b) =>
+          new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0)
+        );
+        return updated;
+      }
+
+      // Chat not in list — insert it. This happens for newly created chats.
+      const newChat = {
+        _id: chatId,
+        ...(chatData || {}),
+        lastMessage: lastMessage || null,
+        updatedAt: resolvedUpdatedAt,
+        createdAt: resolvedUpdatedAt
+      };
+
+      return [newChat, ...prev].sort((a, b) =>
+        new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0)
+      );
+    });
+  }, []);
 
   const handlePrivateMessageReaction = async ({ message }) => {
     const hydratedMessage = await cryptoService.hydratePrivateMessage(message);
@@ -520,21 +873,22 @@ const ChatsPage = () => {
     updateMessageEverywhere(hydratedMessage);
   };
 
-  useEffect(() => {
-    socketHandlersRef.current = {
-      handleNewMessage,
-      handleMessageSent,
-      handleUserTyping,
-      handleUserStopTyping,
-      handleMessagesRead,
-      handleCallRequestSent,
-      handleIncomingCall,
-      handlePrivateMessageReaction,
-      handlePrivateMessageEdit,
-      handlePrivateMessageDelete,
-      handlePrivateMessagePin
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Update the handler ref on every render so socket callbacks always use latest closures
+  socketHandlersRef.current = {
+    handleNewMessage,
+    handleMessageSent,
+    handleUserTyping,
+    handleUserStopTyping,
+    handleMessagesRead,
+    handleUserOnline,
+    handleUserOffline,
+    handleCallRequestSent: () => {},
+    handleIncomingCall: () => {},
+    handlePrivateMessageReaction,
+    handlePrivateMessageEdit,
+    handlePrivateMessageDelete,
+    handlePrivateMessagePin
+  };
 
   const ensurePersistedChat = async (chat = selectedChat, fallbackRecipient = selectedUser) => {
     if (chat?._id) {
@@ -654,25 +1008,28 @@ const ChatsPage = () => {
         isSending: true
       };
 
+      queueBottomScroll('smooth');
       setMessages(prev => [...prev, optimisticMessage]);
       setReplyTarget(null);
 
-      const encryptedContent = await cryptoService.encryptTextForUsers(content, [
+      const participantIds = [
         recipient._id,
         user?._id || user?.id
-      ]);
+      ];
 
       try {
-        const response = await api.sendChatMessage(activeChat._id, {
-          content: cryptoService.encryptedPlaceholder,
-          encryptedContent,
-          messageType: 'text',
-          expiresInSeconds: disappearingTimer,
+        const response = await sendEncryptedTextMessage({
+          chatId: activeChat._id,
+          content,
+          participantIds,
           tempId,
-          replyTo: replyTargetSnapshot?._id || null
+          expiresInSeconds: disappearingTimer,
+          replyToId: replyTargetSnapshot?._id || null
         });
         const persistedMessage = await cryptoService.hydratePrivateMessage(response?.message || response?.data || response);
         if (persistedMessage) {
+          const messageId = normalizeId(persistedMessage._id || persistedMessage.__id);
+          if (messageId) processedMessageIdsRef.current.add(messageId);
           const displayMessage = isEncryptedPlaceholder(persistedMessage)
             ? {
                 ...persistedMessage,
@@ -686,20 +1043,33 @@ const ChatsPage = () => {
               ? { ...displayMessage, isOptimistic: false, isSending: false }
               : message
           )));
-          fetchChats();
+          moveChatToTop(activeChat._id, displayMessage, persistedMessage.createdAt || persistedMessage.updatedAt);
         }
       } catch (restError) {
+        if (!isTransportSendFailure(restError) || !restError.encryptedContent) {
+          const errorMessage = normalizeSendError(restError);
+          setMessages(prev => prev.map(message => (
+            message.tempId === tempId
+              ? { ...message, isSending: false, sendFailed: true, errorMessage }
+              : message
+          )));
+          return;
+        }
+
         try {
-          socketService.sendPrivateMessage(
+          const queuedOrSent = socketService.sendPrivateMessage(
             activeChat._id,
             cryptoService.encryptedPlaceholder,
             'text',
             null,
-            encryptedContent,
+            restError.encryptedContent,
             disappearingTimer,
             tempId,
             replyTargetSnapshot?._id || null
           );
+          if (!queuedOrSent) {
+            throw new Error('Realtime connection is not ready. Please try again when the connection is restored.');
+          }
         } catch (socketError) {
           const errorMessage = normalizeSendError(
             socketError || restError || 'Failed to send encrypted message.'
@@ -747,18 +1117,13 @@ const ChatsPage = () => {
     )));
 
     try {
-      const encryptedContent = await cryptoService.encryptTextForUsers(
-        message.content,
-        [recipient._id, user?._id || user?.id]
-      );
-
-      const response = await api.sendChatMessage(message.chatId, {
-        content: cryptoService.encryptedPlaceholder,
-        encryptedContent,
-        messageType: 'text',
-        expiresInSeconds: message.expiresInSeconds || null,
+      const response = await sendEncryptedTextMessage({
+        chatId: message.chatId,
+        content: message.content,
+        participantIds: [recipient._id, user?._id || user?.id],
         tempId: message.tempId,
-        replyTo: message.replyTo?._id || null
+        expiresInSeconds: message.expiresInSeconds || null,
+        replyToId: message.replyTo?._id || null
       });
 
       const persistedMessage = await cryptoService.hydratePrivateMessage(
@@ -775,7 +1140,7 @@ const ChatsPage = () => {
             ? { ...displayMessage, isOptimistic: false, isSending: false }
             : m
         )));
-        fetchChats();
+        moveChatToTop(message.chatId, displayMessage, persistedMessage.createdAt || persistedMessage.updatedAt);
       }
     } catch (error) {
       console.error('Retry send failed:', error);
@@ -934,6 +1299,7 @@ const ChatsPage = () => {
       const hydratedMessage = await cryptoService.hydratePrivateMessage(response?.data || response);
 
       if (hydratedMessage && idsEqual(targetChat._id, selectedChatRef.current?._id)) {
+        queueBottomScroll('smooth');
         setMessages((currentMessages) => (
           currentMessages.some((message) => idsEqual(message._id, hydratedMessage._id))
             ? currentMessages
@@ -982,16 +1348,15 @@ const ChatsPage = () => {
 
   const handleStartCall = (callType) => {
     if (!selectedChat?._id) {
-      setCallStatus('Send a message before starting a call.');
-      scheduleUiTimeout(() => setCallStatus(null), 3000);
+      showChatError('Cannot start call', 'Send a message before starting a call.');
       return;
     }
-    setCallStatus(`Calling ${callType === 'video' ? 'video' : 'audio'}...`);
-    scheduleUiTimeout(() => setCallStatus(null), 4000);
-    socketService.emit('start_call_request', {
-      chatId: selectedChat._id,
-      callType
-    });
+
+    if (callType === 'video') {
+      handleStartVideoCall();
+    } else {
+      handleStartVoiceCall();
+    }
   };
 
   const handleCallRequestSent = ({ chatId, callType }) => {
@@ -1057,6 +1422,7 @@ const ChatsPage = () => {
         uploadState: 'uploading'
       };
 
+      queueBottomScroll('smooth');
       setMessages((prev) => [...prev, optimisticMessage]);
       setChats((prev) => {
         const updated = prev.map((chat) => {
@@ -1085,6 +1451,7 @@ const ChatsPage = () => {
       const savedMessage = await cryptoService.hydratePrivateMessage(response?.data || response);
       if (!savedMessage) return;
 
+      queueBottomScroll('smooth');
       setMessages(prev => {
         const optimisticIndex = prev.findIndex((message) => (
           message.isOptimistic && message.tempId && message.tempId === tempId
@@ -1106,13 +1473,12 @@ const ChatsPage = () => {
         const updated = prev.map(chat => {
           const chatId = chat._id?.toString() || chat._id;
           if (idsEqual(chatId, activeChat._id)) {
-            return { ...chat, lastMessage: savedMessage, updatedAt: new Date() };
+            return { ...chat, lastMessage: savedMessage, updatedAt: savedMessage.createdAt || savedMessage.updatedAt || new Date().toISOString() };
           }
           return chat;
         });
-        return updated.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+        return updated.sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0));
       });
-      fetchChats();
 
       if (viewOnceNextFile) {
         setViewOnceNextFile(false);
@@ -1145,8 +1511,23 @@ const ChatsPage = () => {
     voiceStreamRef.current = null;
   };
 
-  const startVoiceRecording = async () => {
-    if (encryptionBlocked || isRecordingVoice) {
+  const formatVoiceTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const toggleVoiceRecording = async () => {
+    if (encryptionBlocked || voiceRecordingBlob) {
+      if (voiceRecordingBlob && !isRecordingVoice) {
+        // Cancel recording preview
+        cancelVoiceRecording();
+      }
+      return;
+    }
+
+    if (isRecordingVoice) {
+      stopVoiceRecording();
       return;
     }
 
@@ -1164,6 +1545,13 @@ const ChatsPage = () => {
       voiceChunksRef.current = [];
       voiceStreamRef.current = stream;
       voiceRecorderRef.current = recorder;
+      voiceStartedAtRef.current = Date.now();
+      setVoiceRecordingTime(0);
+
+      // Start recording timer
+      voiceRecordingIntervalRef.current = setInterval(() => {
+        setVoiceRecordingTime(prev => prev + 1);
+      }, 1000);
 
       recorder.ondataavailable = (event) => {
         if (event.data?.size > 0) {
@@ -1176,28 +1564,35 @@ const ChatsPage = () => {
         const chunks = voiceChunksRef.current;
         voiceChunksRef.current = [];
         voiceStartedAtRef.current = null;
+
+        if (voiceRecordingIntervalRef.current) {
+          clearInterval(voiceRecordingIntervalRef.current);
+          voiceRecordingIntervalRef.current = null;
+        }
+
         setIsRecordingVoice(false);
-        setVoiceStartedAt(null);
-        stopVoiceTracks();
 
         if (!chunks.length || durationMs < 500) {
+          showChatError('Recording too short', 'Voice messages must be at least 0.5 seconds long.');
+          stopVoiceTracks();
+          setVoiceRecordingTime(0);
           return;
         }
 
         const blob = new Blob(chunks, { type: mimeType });
-        const file = new File([blob], `voice-${Date.now()}.webm`, { type: 'audio/webm' });
-        await uploadAndSendFile(file, { messageType: 'audio' });
+        const url = URL.createObjectURL(blob);
+        setVoiceRecordingBlob(blob);
+        setVoiceRecordingUrl(url);
+        stopVoiceTracks();
       };
 
-      recorder.start();
-      voiceStartedAtRef.current = Date.now();
-      setVoiceStartedAt(Date.now());
+      recorder.start(100);
       setIsRecordingVoice(true);
     } catch (error) {
       stopVoiceTracks();
       voiceStartedAtRef.current = null;
       setIsRecordingVoice(false);
-      setVoiceStartedAt(null);
+      setVoiceRecordingTime(0);
       showChatError('Microphone unavailable', error.message || 'Microphone access failed.');
     }
   };
@@ -1206,6 +1601,105 @@ const ChatsPage = () => {
     const recorder = voiceRecorderRef.current;
     if (recorder && recorder.state !== 'inactive') {
       recorder.stop();
+    }
+  };
+
+  const cancelVoiceRecording = () => {
+    if (isRecordingVoice) {
+      stopVoiceRecording();
+    }
+    if (voiceRecordingUrl) {
+      URL.revokeObjectURL(voiceRecordingUrl);
+    }
+    setVoiceRecordingBlob(null);
+    setVoiceRecordingUrl(null);
+    setVoiceRecordingTime(0);
+    setIsPlayingVoicePreview(false);
+    if (voicePreviewAudioRef.current) {
+      voicePreviewAudioRef.current.pause();
+      voicePreviewAudioRef.current = null;
+    }
+    stopVoiceTracks();
+  };
+
+  const sendVoiceMessage = async () => {
+    if (!voiceRecordingBlob || !selectedChat) return;
+
+    const file = new File([voiceRecordingBlob], `voice-${Date.now()}.webm`, { type: 'audio/webm' });
+    await uploadAndSendFile(file, { messageType: 'audio' });
+
+    if (voiceRecordingUrl) {
+      URL.revokeObjectURL(voiceRecordingUrl);
+    }
+    setVoiceRecordingBlob(null);
+    setVoiceRecordingUrl(null);
+    setVoiceRecordingTime(0);
+    setIsPlayingVoicePreview(false);
+    if (voicePreviewAudioRef.current) {
+      voicePreviewAudioRef.current.pause();
+      voicePreviewAudioRef.current = null;
+    }
+  };
+
+  const playVoicePreview = () => {
+    if (!voiceRecordingUrl) return;
+
+    if (isPlayingVoicePreview && voicePreviewAudioRef.current) {
+      voicePreviewAudioRef.current.pause();
+      setIsPlayingVoicePreview(false);
+      return;
+    }
+
+    const audio = new Audio(voiceRecordingUrl);
+    voicePreviewAudioRef.current = audio;
+    audio.onended = () => {
+      setIsPlayingVoicePreview(false);
+    };
+    audio.play().catch(err => {
+      console.error('Error playing voice preview:', err);
+    });
+    setIsPlayingVoicePreview(true);
+  };
+
+  const handleStartVoiceCall = async () => {
+    if (!selectedChat?._id) {
+      showChatError('Cannot start call', 'Send a message before starting a call.');
+      return;
+    }
+
+    if (isStartingCall || isInCall) {
+      showChatError('Call in progress', 'Finish the current call before starting another.');
+      return;
+    }
+
+    const recipient = getOtherParticipant(selectedChat);
+    if (!recipient?._id) return;
+
+    try {
+      await startPrivateCall(selectedChat._id, recipient, 'audio');
+    } catch (error) {
+      showChatError('Call failed', error.message);
+    }
+  };
+
+  const handleStartVideoCall = async () => {
+    if (!selectedChat?._id) {
+      showChatError('Cannot start call', 'Send a message before starting a call.');
+      return;
+    }
+
+    if (isStartingCall || isInCall) {
+      showChatError('Call in progress', 'Finish the current call before starting another.');
+      return;
+    }
+
+    const recipient = getOtherParticipant(selectedChat);
+    if (!recipient?._id) return;
+
+    try {
+      await startPrivateCall(selectedChat._id, recipient, 'video');
+    } catch (error) {
+      showChatError('Call failed', error.message);
     }
   };
 
@@ -1747,10 +2241,10 @@ const ChatsPage = () => {
                   >
                     {showArchived ? <Inbox className="w-5 h-5" strokeWidth={1.5} /> : <Archive className="w-5 h-5" strokeWidth={1.5} />}
                   </button>
-                  <button type="button" onClick={() => handleStartCall('audio')} disabled={!selectedChat?._id} className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary disabled:opacity-40 disabled:cursor-not-allowed" title={!selectedChat?._id ? 'Send a message before calling' : 'Audio call'}>
+                  <button type="button" onClick={handleStartVoiceCall} disabled={!selectedChat?._id || isStartingCall || isInCall} className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary disabled:opacity-40 disabled:cursor-not-allowed" title={!selectedChat?._id ? 'Send a message before calling' : isStartingCall ? 'Starting call' : isInCall ? 'Call already in progress' : 'Audio call'}>
                     <Phone className="w-5 h-5" strokeWidth={1.5} />
                   </button>
-                  <button type="button" onClick={() => handleStartCall('video')} disabled={!selectedChat?._id} className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary disabled:opacity-40 disabled:cursor-not-allowed" title={!selectedChat?._id ? 'Send a message before calling' : 'Video call'}>
+                  <button type="button" onClick={handleStartVideoCall} disabled={!selectedChat?._id || isStartingCall || isInCall} className="p-2.5 hover:bg-white/[0.06] rounded-xl transition-colors text-tx-secondary hover:text-tx-primary disabled:opacity-40 disabled:cursor-not-allowed" title={!selectedChat?._id ? 'Send a message before calling' : isStartingCall ? 'Starting call' : isInCall ? 'Call already in progress' : 'Video call'}>
                     <Video className="w-5 h-5" strokeWidth={1.5} />
                   </button>
                 </div>
@@ -1759,7 +2253,7 @@ const ChatsPage = () => {
           })()}
 
           {/* ── Messages Area ── */}
-          <div className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 space-y-3">
+          <div ref={messagesContainerRef} onScroll={handleMessagesScroll} className="flex-1 min-h-0 overflow-y-auto p-4 md:p-6 space-y-3">
             {callStatus && (
               <div className="flex justify-center">
                 <div className="px-4 py-2 mb-3 rounded-full bg-white/10 text-white text-sm shadow-lg backdrop-blur-xl border border-white/10">
@@ -1849,10 +2343,10 @@ const ChatsPage = () => {
                     </div>
                   )}
                   <div
-                    className={`flex ${isOwn ? 'justify-end' : 'justify-start'} items-end space-x-2`}
+                    className={`group/msg flex ${isOwn ? 'justify-end' : 'justify-start'} items-end space-x-2 relative`}
                   >
                   {!isOwn && (
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 overflow-hidden ${!showAvatar ? 'opacity-0' : ''}`} style={{background: 'linear-gradient(135deg, rgba(0,240,255,0.20) 0%, rgba(0,255,102,0.10) 100%)', border: '1px solid rgba(255,255,255,0.06)'}}>
+                    <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden ${!showAvatar ? 'opacity-0' : ''}`} style={{background: 'linear-gradient(135deg, rgba(0,240,255,0.20) 0%, rgba(0,255,102,0.10) 100%)'}}>
                       {showAvatar && (
                         message?.sender?.avatar ? (
                           <img src={message.sender.avatar} alt={getMessageSenderName(message)} className="w-full h-full object-cover" />
@@ -1863,13 +2357,19 @@ const ChatsPage = () => {
                     </div>
                   )}
                   <div
-                    className={`max-w-[85%] sm:max-w-[75%] md:max-w-[70%] rounded-2xl px-4 py-2.5 shadow-sm ${
+                    data-message-bubble="true"
+                    onClick={(event) => {
+                      if (event.target.closest('button') || event.target.closest('a')) return;
+                      if (message.isDeleted) return;
+                      setActiveMessageMenuId((current) => (current === message._id ? null : message._id));
+                    }}
+                    className={`relative max-w-[85%] sm:max-w-[75%] md:max-w-[70%] rounded-2xl px-3.5 py-2 shadow-sm cursor-pointer select-none transition-colors ${
                       isOwn
-                        ? 'bg-accent/[0.12] text-tx-primary rounded-br-md border border-accent/10'
-                        : 'bg-white/[0.05] text-tx-primary rounded-bl-md border border-white/[0.06]'
-                    }`}
+                        ? 'bg-accent/[0.12] text-tx-primary rounded-br-md hover:bg-accent/[0.16]'
+                        : 'bg-white/[0.06] text-tx-primary rounded-bl-md hover:bg-white/[0.09]'
+                    } ${activeMessageMenuId === message._id ? 'ring-1 ring-accent/40' : ''}`}
                   >
-                    {(message.isPinned || message.forwardedFrom) && (
+                    {(message.isPinned || isForwardedMessage(message)) && (
                       <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-wide text-white/60">
                         {message.isPinned && (
                           <span className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1">
@@ -1877,10 +2377,10 @@ const ChatsPage = () => {
                             Pinned
                           </span>
                         )}
-                        {message.forwardedFrom && (
+                        {isForwardedMessage(message) && (
                           <span className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1">
                             <Forward className="h-3 w-3" />
-                            Forwarded from {message.forwardedFrom?.originalSenderName || message.forwardedFrom?.originalSender?.username || 'Unknown'}
+                            Forwarded from {getForwardedFromLabel(message)}
                           </span>
                         )}
                       </div>
@@ -1900,7 +2400,7 @@ const ChatsPage = () => {
                       </div>
                     )}
 
-                    {message.fileMetadata ? (
+                    {hasRenderableAttachment(message) ? (
                       <MessageAttachmentCard
                         message={message}
                         isOwn={isOwn}
@@ -1983,62 +2483,69 @@ const ChatsPage = () => {
                         )}
                       </div>
                     )}
-                    {!message.isDeleted && (
-                      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                    {activeMessageMenuId === message._id && !message.isDeleted && (
+                      <div
+                        data-message-menu="true"
+                        onClick={(event) => event.stopPropagation()}
+                        className={`absolute ${isOwn ? 'right-0' : 'left-0'} top-full mt-1.5 z-30 min-w-[200px] rounded-xl border border-white/[0.08] bg-[#1a1d24]/98 backdrop-blur-xl shadow-2xl overflow-hidden`}
+                      >
+                        <div className="flex items-center justify-around gap-0.5 border-b border-white/[0.06] px-1.5 py-1.5">
+                          {['👍', '❤️', '😂', '😮', '😢', '🙏'].map((emoji) => (
+                            <button
+                              key={`${message._id}-${emoji}-menu`}
+                              type="button"
+                              onClick={() => { handleToggleReaction(message, emoji); setActiveMessageMenuId(null); }}
+                              className="p-1.5 rounded-full text-lg transition-colors hover:bg-white/10"
+                              title={`React ${emoji}`}
+                            >
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
                         <button
                           type="button"
-                          onClick={() => startReplyingToMessage(message)}
-                          className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                          onClick={() => { startReplyingToMessage(message); setActiveMessageMenuId(null); }}
+                          className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-white/85 transition-colors hover:bg-white/[0.06]"
                         >
-                          <Reply className="h-3 w-3" />
-                          Reply
-                        </button>
-                        {['👍', '❤️', '😂'].map((emoji) => (
-                          <button
-                            key={`${message._id}-${emoji}-quick`}
-                            type="button"
-                            onClick={() => handleToggleReaction(message, emoji)}
-                            className="rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
-                          >
-                            {emoji}
-                          </button>
-                        ))}
-                        <button
-                          type="button"
-                          onClick={() => handleTogglePin(message)}
-                          className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
-                        >
-                          <Pin className="h-3 w-3" />
-                          {message.isPinned ? 'Unpin' : 'Pin'}
+                          <Reply className="h-4 w-4" />
+                          <span>Reply</span>
                         </button>
                         {isForwardablePlaintextMessage(message) && (
                           <button
                             type="button"
-                            onClick={() => startForwardingMessage(message)}
-                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                            onClick={() => { startForwardingMessage(message); setActiveMessageMenuId(null); }}
+                            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-white/85 transition-colors hover:bg-white/[0.06]"
                           >
-                            <Forward className="h-3 w-3" />
-                            Forward
+                            <Forward className="h-4 w-4" />
+                            <span>Forward</span>
                           </button>
                         )}
-                        {isOwn && !message.fileMetadata && !message.encryptedContent && Number(message.protocolVersion || 1) < 2 && (
+                        <button
+                          type="button"
+                          onClick={() => { handleTogglePin(message); setActiveMessageMenuId(null); }}
+                          className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-white/85 transition-colors hover:bg-white/[0.06]"
+                        >
+                          <Pin className="h-4 w-4" />
+                          <span>{message.isPinned ? 'Unpin' : 'Pin'}</span>
+                        </button>
+                        {isOwn && !hasRenderableAttachment(message) && !message.encryptedContent && Number(message.protocolVersion || 1) < 2 && (
                           <button
                             type="button"
-                            onClick={() => startEditingMessage(message)}
-                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                            onClick={() => { startEditingMessage(message); setActiveMessageMenuId(null); }}
+                            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-white/85 transition-colors hover:bg-white/[0.06]"
                           >
-                            <Pencil className="h-3 w-3" />
-                            Edit
+                            <Pencil className="h-4 w-4" />
+                            <span>Edit</span>
                           </button>
                         )}
                         {isOwn && (
                           <button
                             type="button"
-                            onClick={() => handleDeleteMessage(message)}
-                            className="inline-flex items-center gap-1 rounded-full bg-black/15 px-2 py-1 text-white/80 transition-colors hover:bg-black/25"
+                            onClick={() => { handleDeleteMessage(message); setActiveMessageMenuId(null); }}
+                            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-red-400 transition-colors hover:bg-red-500/10"
                           >
-                            <Trash2 className="h-3 w-3" />
-                            Delete
+                            <Trash2 className="h-4 w-4" />
+                            <span>Delete</span>
                           </button>
                         )}
                       </div>
@@ -2063,6 +2570,17 @@ const ChatsPage = () => {
             })}
             <div ref={messagesEndRef} />
           </div>
+          {showNewMessageIndicator && (
+            <div className="pointer-events-none absolute bottom-28 left-0 right-0 z-30 flex justify-center">
+              <button
+                type="button"
+                onClick={() => scrollToBottom('smooth')}
+                className="pointer-events-auto rounded-full border border-accent/25 bg-[#111720]/95 px-4 py-2 text-xs font-ui font-semibold text-accent shadow-lg backdrop-blur-xl transition-all hover:border-accent/40 hover:bg-[#151d28]"
+              >
+                New message
+              </button>
+            </div>
+          )}
 
           {/* ── Message Composer: Premium Floating Bar ── */}
           <div className="shrink-0 p-3 md:p-4 bg-[#0c1118]/95 backdrop-blur-xl border-t border-white/[0.08]">
@@ -2093,47 +2611,80 @@ const ChatsPage = () => {
               <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileInput} accept="image/*,video/*,audio/*,application/pdf,text/plain" />
               <input type="file" ref={audioInputRef} className="hidden" onChange={handleFileInput} accept="audio/*" />
 
-              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={encryptionBlocked} className="p-2.5 bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.06] hover:border-accent/20 rounded-xl transition-all focus:outline-none" title="Send file, image or video">
+              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={encryptionBlocked || voiceRecordingBlob} className="p-2.5 bg-white/[0.03] border border-white/[0.06] hover:bg-white/[0.06] hover:border-accent/20 rounded-xl transition-all focus:outline-none" title="Send file, image or video">
                 <Paperclip className="w-5 h-5 text-tx-secondary" strokeWidth={1.5} />
               </button>
-              <button
-                type="button"
-                onMouseDown={startVoiceRecording}
-                onMouseUp={stopVoiceRecording}
-                onMouseLeave={stopVoiceRecording}
-                onTouchStart={(event) => {
-                  event.preventDefault();
-                  void startVoiceRecording();
-                }}
-                onTouchEnd={(event) => {
-                  event.preventDefault();
-                  stopVoiceRecording();
-                }}
-                onDoubleClick={() => audioInputRef.current?.click()}
-                disabled={encryptionBlocked}
-                className={`p-2.5 border rounded-xl transition-all focus:outline-none ${
-                  isRecordingVoice
-                    ? 'border-red-400/30 bg-red-400/15 text-red-200'
-                    : 'border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.06] hover:border-accent/20'
-                }`}
-                title={isRecordingVoice ? 'Release to send voice message' : 'Hold to record, double-click to choose audio file'}
-              >
-                <Mic className={`w-5 h-5 ${isRecordingVoice ? 'text-red-200' : 'text-tx-secondary'}`} strokeWidth={1.5} />
-              </button>
+              {voiceRecordingBlob ? (
+                // Voice recording preview UI
+                <div className="flex items-center gap-2 px-3 py-2 bg-accent/[0.1] border border-accent/30 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={playVoicePreview}
+                    className="p-1.5 hover:bg-accent/20 rounded-lg transition-colors"
+                    title={isPlayingVoicePreview ? 'Pause' : 'Play'}
+                  >
+                    {isPlayingVoicePreview ? <Pause className="w-4 h-4 text-accent" /> : <Play className="w-4 h-4 text-accent" />}
+                  </button>
+                  <span className="text-xs font-mono text-accent min-w-[40px]">
+                    {formatVoiceTime(voiceRecordingTime)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={sendVoiceMessage}
+                    className="p-1.5 bg-accent hover:bg-accent/80 rounded-lg transition-colors"
+                    title="Send voice message"
+                  >
+                    <Send className="w-4 h-4 text-white" strokeWidth={2} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelVoiceRecording}
+                    className="p-1.5 hover:bg-red-500/20 rounded-lg transition-colors"
+                    title="Delete"
+                  >
+                    <Trash className="w-4 h-4 text-red-400" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={toggleVoiceRecording}
+                  onDoubleClick={() => audioInputRef.current?.click()}
+                  disabled={encryptionBlocked}
+                  className={`p-2.5 border rounded-xl transition-all focus:outline-none ${
+                    isRecordingVoice
+                      ? 'border-red-400/30 bg-red-400/15 text-red-200 animate-pulse'
+                      : 'border-white/[0.06] bg-white/[0.03] hover:bg-white/[0.06] hover:border-accent/20'
+                  }`}
+                  title={isRecordingVoice ? 'Click to stop recording' : 'Click to record voice message'}
+                >
+                  {isRecordingVoice ? <Square className="w-4 h-4 text-red-200" /> : <Mic className={`w-5 h-5 ${isRecordingVoice ? 'text-red-200' : 'text-tx-secondary'}`} strokeWidth={1.5} />}
+                </button>
+              )}
               <div className="flex-1 relative">
-                <input type="text" value={messageInput} onChange={handleTyping} disabled={encryptionBlocked} placeholder={ encryptionBlocked ? 'Import your key backup to send encrypted messages' : editingMessage ? 'Edit your message' : replyTarget ? 'Write your reply' : 'Type a message...' } className="w-full px-4 py-3 bg-white/[0.03] border border-white/[0.06] rounded-2xl text-tx-primary placeholder-tx-muted focus:outline-none focus:border-accent/20 focus:bg-white/[0.05] transition-all text-sm" />
+                <input type="text" value={messageInput} onChange={handleTyping} disabled={encryptionBlocked || voiceRecordingBlob} placeholder={encryptionBlocked ? 'Import your key backup to send encrypted messages' : editingMessage ? 'Edit your message' : replyTarget ? 'Write your reply' : voiceRecordingBlob ? 'Send or cancel voice message to continue' : 'Type a message...'} className="w-full px-4 py-3 bg-white/[0.03] border border-white/[0.06] rounded-2xl text-tx-primary placeholder-tx-muted focus:outline-none focus:border-accent/20 focus:bg-white/[0.05] transition-all text-sm" />
                 <button type="button" className="absolute right-3 top-1/2 -translate-y-1/2 text-tx-muted hover:text-tx-primary transition-colors focus:outline-none" title="Emoji">
                   <Smile className="w-5 h-5" strokeWidth={1.5} />
                 </button>
               </div>
-              <button type="submit" disabled={!messageInput.trim() || encryptionBlocked} className="p-3 bg-accent text-void rounded-xl hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-glow active:scale-95" title={editingMessage ? 'Save edit' : 'Send'}>
+              <button type="submit" disabled={(!messageInput.trim() && !voiceRecordingBlob) || encryptionBlocked} className="p-3 bg-accent text-void rounded-xl hover:brightness-110 transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-glow active:scale-95" title={editingMessage ? 'Save edit' : 'Send'}>
                 <Send className="w-5 h-5" strokeWidth={2} />
               </button>
             </form>
             {isRecordingVoice && (
-              <div className="mt-2 flex items-center gap-2 rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-100">
-                <span className="h-2 w-2 animate-pulse rounded-full bg-red-300" />
-                <span>Recording voice message. Release to send.</span>
+              <div className="mt-2 flex items-center gap-3 rounded-xl border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-100">
+                <div className="flex items-center gap-2">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-red-300" />
+                  <span className="font-mono font-bold">{formatVoiceTime(voiceRecordingTime)}</span>
+                  <span>Recording...</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={toggleVoiceRecording}
+                  className="ml-auto px-3 py-1 bg-red-500/20 hover:bg-red-500/30 rounded-lg transition-colors"
+                >
+                  Stop
+                </button>
               </div>
             )}
           </div>
@@ -2205,6 +2756,7 @@ const ChatsPage = () => {
         onClose={() => setForwardingMessage(null)}
         onForward={handleForwardMessage}
       />
+
     </div>
         )}
       </div>

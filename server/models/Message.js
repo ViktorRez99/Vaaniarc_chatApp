@@ -280,8 +280,7 @@ messageSchema.methods.canEdit = function(userId) {
 
 // Check if user can delete this message
 messageSchema.methods.canDelete = function(userId) {
-  return this.sender.toString() === userId.toString() && 
-         (!this.revocableUntil || this.revocableUntil.getTime() > Date.now()) &&
+  return this.sender.toString() === userId.toString() &&
          !this.isDeleted;
 };
 

@@ -2,6 +2,7 @@ const crypto = require('crypto');
 
 const Session = require('../models/Session');
 const User = require('../models/User');
+const Device = require('../models/Device');
 const cacheService = require('../services/cacheService');
 
 const SESSION_COOKIE_NAME = 'vaaniarc_session';
@@ -76,6 +77,13 @@ const getRequestDeviceId = (req) => {
   }
 
   return crypto.randomUUID();
+};
+
+const getHeaderDeviceId = (req) => {
+  const headerDeviceId = req?.headers?.['x-device-id'];
+  return typeof headerDeviceId === 'string' && headerDeviceId.trim()
+    ? headerDeviceId.trim()
+    : null;
 };
 
 const getSessionCookieOptions = (expiresAt) => ({
@@ -342,10 +350,23 @@ const attachAuthContext = async (req, authContext) => {
   req.user = authContext.user;
   req.session = authContext.session || null;
   req.authStrategy = authContext.authStrategy;
-  req.deviceId = authContext.session?.deviceId || req.headers['x-device-id'] || null;
+  const requestedDeviceId = getHeaderDeviceId(req);
+  req.deviceId = authContext.session?.deviceId || requestedDeviceId || null;
 
   if (authContext.session) {
     await touchSession(authContext.session, req);
+
+    if (requestedDeviceId && requestedDeviceId !== authContext.session.deviceId) {
+      const requestedDevice = await Device.findOne({
+        user: authContext.user._id,
+        deviceId: requestedDeviceId,
+        revokedAt: null
+      }).select('_id');
+
+      if (requestedDevice) {
+        await updateRequestSessionDeviceId(req, requestedDeviceId);
+      }
+    }
   }
 };
 

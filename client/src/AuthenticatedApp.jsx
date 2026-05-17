@@ -3,6 +3,7 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom"
 import { AnimatePresence, motion } from "framer-motion"
 import { AuthProvider, useAuth } from "./context/AuthContext"
 import { SocketProvider } from "./context/SocketContext"
+import { CallProvider } from "./context/CallContext"
 import Auth from "./components/Auth"
 import { Toaster } from "./components/ui/Toaster"
 
@@ -141,14 +142,17 @@ const RuntimeOverlays = () => {
 const AuthenticatedRoutes = () => {
   const { isAuthenticated } = useAuth()
   const location = useLocation()
+  const isChatShellRoute = location.pathname === "/chat" || location.pathname.startsWith("/meeting")
+  const routeTransitionKey = isChatShellRoute ? "chat-shell" : location.pathname
 
   return (
     <AnimatePresence mode="wait" initial={false}>
-      <Routes location={location} key={location.pathname}>
+      <Routes location={location} key={routeTransitionKey}>
         <Route path="/auth" element={<PublicOnlyRoute><PageMotion><AuthErrorBoundary><Auth /></AuthErrorBoundary></PageMotion></PublicOnlyRoute>} />
         <Route path="/verify-email" element={<PageMotion><VerifyEmail /></PageMotion>} />
         <Route path="/passkey-setup" element={<PasskeySetupRoute><PageMotion><PasskeySetup /></PageMotion></PasskeySetupRoute>} />
         <Route path="/chat" element={<ProtectedRoute><PageMotion><ChatHub /></PageMotion></ProtectedRoute>} />
+        <Route path="/meeting" element={<ProtectedRoute><PageMotion><ChatHub /></PageMotion></ProtectedRoute>} />
         <Route path="/meeting/:meetingId" element={<ProtectedRoute><PageMotion><ChatHub /></PageMotion></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><PageMotion><Settings /></PageMotion></ProtectedRoute>} />
         <Route path="*" element={<Navigate to={isAuthenticated ? "/chat" : "/auth"} replace />} />
@@ -161,10 +165,12 @@ const AuthenticatedApp = () => (
   <div className="min-h-screen" style={{ background: '#000', minHeight: '100vh' }}>
     <AuthProvider>
       <SocketProvider>
-        <Suspense fallback={<LoadingScreen />}>
-          <AuthenticatedRoutes />
-          <RuntimeOverlays />
-        </Suspense>
+        <CallProvider>
+          <Suspense fallback={<LoadingScreen />}>
+            <AuthenticatedRoutes />
+            <RuntimeOverlays />
+          </Suspense>
+        </CallProvider>
       </SocketProvider>
     </AuthProvider>
     <Toaster />

@@ -1,5 +1,6 @@
 import { io } from 'socket.io-client';
 import { decodeSocketPayload, encodeSocketPayload } from './socketPayloads';
+import { getOrCreateDeviceId } from '../utils/device';
 const OFFLINE_QUEUE_STORAGE_KEY = 'vaaniarc_socket_offline_queue';
 const MAX_OFFLINE_QUEUE_LENGTH = 100;
 const MAX_QUEUE_ATTEMPTS = 5;
@@ -281,6 +282,9 @@ class SocketService {
     if (!this.socket) {
       this.socket = io(this.getSocketUrl(), {
         autoConnect: false,
+        auth: {
+          deviceId: getOrCreateDeviceId()
+        },
         path: '/socket.io',
         transports: ['websocket', 'polling'],
         timeout: 10000,
@@ -296,6 +300,10 @@ class SocketService {
     }
 
     this.attachBrowserListeners();
+    this.socket.auth = {
+      ...(this.socket.auth || {}),
+      deviceId: getOrCreateDeviceId()
+    };
 
     if (this.socket.connected) {
       this.isConnected = true;
@@ -424,7 +432,7 @@ class SocketService {
   }
 
   sendRoomMessage(roomId, content, messageType = 'text', replyTo = null, encryptedContent = null, tempId = null, expiresInSeconds = null) {
-    this.emit('room_message', {
+    return this.emit('room_message', {
       roomId,
       content,
       messageType,
@@ -436,7 +444,7 @@ class SocketService {
   }
 
   sendPrivateMessage(chatId, content, messageType = 'text', fileUrl = null, encryptedContent = null, expiresInSeconds = null, tempId = null, replyTo = null) {
-    this.emit('private_message', {
+    return this.emit('private_message', {
       chatId,
       content,
       messageType,

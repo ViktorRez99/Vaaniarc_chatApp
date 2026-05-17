@@ -238,7 +238,6 @@ privateMessageSchema.methods.canEdit = function canEdit(userId) {
 
 privateMessageSchema.methods.canDelete = function canDelete(userId) {
   return this.sender.toString() === userId.toString()
-    && (!this.revocableUntil || this.revocableUntil.getTime() > Date.now())
     && !this.isDeleted;
 };
 

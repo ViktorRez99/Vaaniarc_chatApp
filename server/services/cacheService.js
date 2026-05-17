@@ -1,37 +1,11 @@
-const { createClient } = require('redis');
-
 const logger = require('../utils/logger');
 
 const DEFAULT_MEMORY_TTL_MS = 30000;
-const REDIS_KEY_PREFIX = String(process.env.REDIS_KEY_PREFIX || 'vaaniarc').trim();
-
-const redisState = {
-  client: null,
-  connectPromise: null,
-  mode: process.env.REDIS_URL ? 'redis' : 'memory',
-  connected: false,
-  lastError: null
-};
 
 const memoryState = {
   cache: new Map(),
   rateLimits: new Map(),
   sessions: new Map()
-};
-
-const buildRedisKey = (namespace, key) => `${REDIS_KEY_PREFIX}:${namespace}:${key}`;
-
-const serialize = (value) => JSON.stringify(value);
-const deserialize = (value) => {
-  if (value === null || value === undefined) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(value);
-  } catch (error) {
-    return null;
-  }
 };
 
 const cleanupMemoryMap = (store, getExpiresAt) => {
@@ -44,107 +18,8 @@ const cleanupMemoryMap = (store, getExpiresAt) => {
   }
 };
 
-const ensureRedisConnection = async () => {
-  if (!process.env.REDIS_URL) {
-    redisState.mode = 'memory';
-    redisState.connected = false;
-    redisState.connectPromise = null;
-    return {
-      mode: 'memory',
-      client: null
-    };
-  }
-
-  if (redisState.client && redisState.connected && redisState.client.isOpen) {
-    return {
-      mode: 'redis',
-      client: redisState.client
-    };
-  }
-
-  if (!redisState.connectPromise) {
-    if (redisState.client && !redisState.client.isOpen) {
-      redisState.client = null;
-    }
-
-    const client = createClient({
-      url: process.env.REDIS_URL
-    });
-
-    client.on('ready', () => {
-      redisState.connected = true;
-      redisState.mode = 'redis';
-      redisState.lastError = null;
-      logger.info('Connected to Redis');
-    });
-
-    client.on('error', (error) => {
-      redisState.lastError = error.message;
-      logger.error('Redis connection error', error);
-    });
-
-    client.on('end', () => {
-      redisState.connected = false;
-      redisState.connectPromise = null;
-      redisState.mode = process.env.REDIS_URL ? 'redis' : 'memory';
-    });
-
-    redisState.connectPromise = client.connect()
-      .then(() => {
-        redisState.client = client;
-        redisState.connected = true;
-        redisState.mode = 'redis';
-        redisState.connectPromise = null;
-        return {
-          mode: 'redis',
-          client
-        };
-      })
-      .catch((error) => {
-        redisState.lastError = error.message;
-        redisState.connected = false;
-        redisState.mode = 'memory';
-        redisState.connectPromise = null;
-        logger.warn('Redis unavailable, using in-memory cache', error.message);
-        return {
-          mode: 'memory',
-          client: null
-        };
-      });
-  }
-
-  return redisState.connectPromise;
-};
-
-const deleteRedisKeysByPrefix = async (client, namespace, prefix) => {
-  const match = buildRedisKey(namespace, `${prefix}*`);
-  let cursor = '0';
-  let deletedCount = 0;
-
-  do {
-    const result = await client.scan(cursor, {
-      MATCH: match,
-      COUNT: 100
-    });
-    cursor = result.cursor;
-
-    if (Array.isArray(result.keys) && result.keys.length > 0) {
-      deletedCount += result.keys.length;
-      await client.del(result.keys);
-    }
-  } while (cursor !== '0');
-
-  return deletedCount;
-};
-
 const cacheNamespace = {
   async get(key) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      return deserialize(await connection.client.get(buildRedisKey('cache', key)));
-    }
-
     const entry = memoryState.cache.get(key);
     if (!entry) {
       return undefined;
@@ -159,20 +34,6 @@ const cacheNamespace = {
   },
 
   async set(key, value, ttlMs = DEFAULT_MEMORY_TTL_MS) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      const redisKey = buildRedisKey('cache', key);
-      if (ttlMs > 0) {
-        await connection.client.set(redisKey, serialize(value), {
-          PX: ttlMs
-        });
-      } else {
-        await connection.client.set(redisKey, serialize(value));
-      }
-      return value;
-    }
-
     memoryState.cache.set(key, {
       value,
       expiresAt: Date.now() + ttlMs
@@ -181,23 +42,10 @@ const cacheNamespace = {
   },
 
   async delete(key) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      await connection.client.del(buildRedisKey('cache', key));
-      return;
-    }
-
     memoryState.cache.delete(key);
   },
 
   async deleteByPrefix(prefix) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      return deleteRedisKeysByPrefix(connection.client, 'cache', prefix);
-    }
-
     let deletedCount = 0;
     for (const key of memoryState.cache.keys()) {
       if (key.startsWith(prefix)) {
@@ -228,24 +76,6 @@ const cacheNamespace = {
 
 const rateLimitNamespace = {
   async increment(key, windowMs) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      const redisKey = buildRedisKey('ratelimit', key);
-      const count = Number(await connection.client.incr(redisKey));
-      let ttlMs = Number(await connection.client.pTTL(redisKey));
-
-      if (!Number.isFinite(ttlMs) || ttlMs < 0) {
-        await connection.client.pExpire(redisKey, windowMs);
-        ttlMs = windowMs;
-      }
-
-      return {
-        count,
-        resetAt: Date.now() + ttlMs
-      };
-    }
-
     const now = Date.now();
     const existing = memoryState.rateLimits.get(key);
 
@@ -263,17 +93,6 @@ const rateLimitNamespace = {
   },
 
   async decrement(key) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      const redisKey = buildRedisKey('ratelimit', key);
-      const nextCount = Number(await connection.client.decr(redisKey));
-      if (nextCount <= 0) {
-        await connection.client.del(redisKey);
-      }
-      return;
-    }
-
     const record = memoryState.rateLimits.get(key);
     if (record && record.count > 0) {
       record.count -= 1;
@@ -281,13 +100,6 @@ const rateLimitNamespace = {
   },
 
   async reset(key) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      await connection.client.del(buildRedisKey('ratelimit', key));
-      return;
-    }
-
     memoryState.rateLimits.delete(key);
   },
 
@@ -298,12 +110,6 @@ const rateLimitNamespace = {
 
 const sessionNamespace = {
   async get(tokenHash) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      return deserialize(await connection.client.get(buildRedisKey('session', tokenHash)));
-    }
-
     const record = memoryState.sessions.get(tokenHash);
     if (!record) {
       return null;
@@ -318,15 +124,6 @@ const sessionNamespace = {
   },
 
   async set(tokenHash, value, ttlMs) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      await connection.client.set(buildRedisKey('session', tokenHash), serialize(value), {
-        PX: ttlMs
-      });
-      return value;
-    }
-
     memoryState.sessions.set(tokenHash, {
       value,
       expiresAt: Date.now() + ttlMs
@@ -339,13 +136,6 @@ const sessionNamespace = {
   },
 
   async delete(tokenHash) {
-    const connection = await ensureRedisConnection();
-
-    if (connection.client) {
-      await connection.client.del(buildRedisKey('session', tokenHash));
-      return;
-    }
-
     memoryState.sessions.delete(tokenHash);
   },
 
@@ -366,56 +156,15 @@ if (typeof cleanupInterval.unref === 'function') {
 
 const cacheService = {
   async connect() {
-    const connection = await ensureRedisConnection();
-    const clusterEnabled = String(process.env.CLUSTER_ENABLED || '').toLowerCase() === 'true';
-    const workerCount = Number.parseInt(process.env.WEB_CONCURRENCY || process.env.CLUSTER_WORKERS || '1', 10);
-
-    if (clusterEnabled && workerCount > 1 && connection.mode !== 'redis') {
-      throw new Error('Redis is required for cluster mode. Set REDIS_URL.');
-    }
-
-    return connection;
+    logger.info('Cache service using in-memory store');
+    return { mode: 'memory', client: null };
   },
   async disconnect() {
-    const pendingConnection = redisState.connectPromise;
-    let client = redisState.client;
-
-    if (!client && pendingConnection) {
-      try {
-        const connection = await pendingConnection;
-        client = connection?.client || redisState.client;
-      } catch (error) {
-        client = redisState.client;
-      }
-    }
-
-    redisState.client = null;
-    redisState.connectPromise = null;
-    redisState.connected = false;
-    redisState.mode = process.env.REDIS_URL ? 'redis' : 'memory';
-
-    if (!client) {
-      return;
-    }
-
-    try {
-      if (client.isOpen) {
-        await client.quit();
-      }
-    } catch (error) {
-      if (client.isOpen) {
-        client.disconnect();
-      }
-    }
+    // No-op for in-memory store
   },
   getStatus() {
     return {
-      mode: redisState.mode,
-      redis: {
-        configured: Boolean(process.env.REDIS_URL),
-        connected: redisState.connected,
-        lastError: redisState.lastError
-      },
+      mode: 'memory',
       memory: {
         cacheEntries: memoryState.cache.size,
         rateLimitEntries: memoryState.rateLimits.size,

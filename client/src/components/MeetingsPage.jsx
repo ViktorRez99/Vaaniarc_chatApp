@@ -22,7 +22,10 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   const [meetingTitle, setMeetingTitle] = useState('');
   const [joinMeetingId, setJoinMeetingId] = useState('');
   const [isCreatingMeeting, setIsCreatingMeeting] = useState(false);
-  
+  const [isStartingMeeting, setIsStartingMeeting] = useState(false);
+  const [isJoiningMeeting, setIsJoiningMeeting] = useState(false);
+  const [hasManuallyLeftMeeting, setHasManuallyLeftMeeting] = useState(false);
+
   // Meeting controls state
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
@@ -37,6 +40,31 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   const peerConnectionsRef = useRef({});
   const timeoutRefs = useRef(new Set());
   const routeJoinRef = useRef(null);
+  const isLeavingRef = useRef(false);
+  const mediaInitSeqRef = useRef(0);
+  const isMountedRef = useRef(false);
+
+  const getMeetingId = (meeting) => meeting?.meetingId || meeting?.id || meeting?._id || null;
+
+  const clearStoredMeetingState = () => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    ['currentMeeting', 'activeMeeting', 'meetingId'].forEach((key) => {
+      window.localStorage?.removeItem(key);
+      window.sessionStorage?.removeItem(key);
+    });
+  };
+
+  const resetMeetingUiState = () => {
+    setIsInMeeting(false);
+    setActiveMeeting(null);
+    setIsAudioEnabled(true);
+    setIsVideoEnabled(true);
+    setIsScreenSharing(false);
+    setShowParticipants(false);
+  };
 
   const scheduleTimeout = (callback, delay) => {
     const timeoutId = window.setTimeout(() => {
@@ -48,8 +76,13 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   useEffect(() => () => {
+    isMountedRef.current = false;
     timeoutRefs.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
     timeoutRefs.current.clear();
+  }, []);
+
+  useEffect(() => {
+    isMountedRef.current = true;
   }, []);
 
   // Expose methods to parent via ref
@@ -64,22 +97,35 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   }, [user]);
 
   useEffect(() => {
-    if (meetingIdFromRoute && user && !isInMeeting && routeJoinRef.current !== meetingIdFromRoute) {
+    // Only auto-join if user hasn't manually left and not currently joining.
+    if (
+      meetingIdFromRoute
+      && user
+      && !isInMeeting
+      && !isLeavingRef.current
+      && !hasManuallyLeftMeeting
+      && !isJoiningMeeting
+      && !isStartingMeeting
+      && routeJoinRef.current !== meetingIdFromRoute
+    ) {
       routeJoinRef.current = meetingIdFromRoute;
-      joinMeeting(meetingIdFromRoute).catch((error) => {
+      joinMeeting(meetingIdFromRoute, { replace: true }).catch((error) => {
         console.error('Error joining meeting from route:', error);
         routeJoinRef.current = null;
+        setHasManuallyLeftMeeting(false); // Reset so manual rejoin works
       });
     }
-  }, [meetingIdFromRoute, user, isInMeeting]);
+  }, [meetingIdFromRoute, user, isInMeeting, hasManuallyLeftMeeting, isJoiningMeeting, isStartingMeeting]);
 
   useEffect(() => {
     if (isInMeeting && activeMeeting) {
+      const seq = ++mediaInitSeqRef.current;
       setupSocketListeners();
-      initializeMedia();
+      initializeMedia(seq);
     }
 
     return () => {
+      mediaInitSeqRef.current++;
       cleanupMedia();
       cleanupSocketListeners();
     };
@@ -98,27 +144,40 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   const createMeeting = async (isInstant = false) => {
-    if (isCreatingMeeting) return;
-    
+    if (isInstant) {
+      await startInstantMeeting();
+      return;
+    }
+
+    if (isCreatingMeeting || isJoiningMeeting) return;
+
     try {
       setIsCreatingMeeting(true);
-      const title = isInstant ? `Instant Meeting - ${new Date().toLocaleTimeString()}` : (meetingTitle || 'New Meeting');
-      
+      const title = meetingTitle || 'New Meeting';
+
       const response = await api.post('/meetings', {
         title,
         scheduledAt: null
       });
-      
+
       const meeting = response;
-      setActiveMeeting(meeting);
+      const meetingId = getMeetingId(meeting);
+
+      if (!meetingId) {
+        throw new Error('Meeting ID missing from create meeting response');
+      }
+
       setShowCreateModal(false);
       setMeetingTitle('');
-      await joinMeeting(meeting.meetingId);
+      setHasManuallyLeftMeeting(false);
+      setActiveMeeting(meeting);
+
+      await joinMeeting(meetingId, { replace: true });
     } catch (error) {
       console.error('Error creating meeting:', error);
       toast({
         title: 'Meeting not created',
-        description: 'Failed to create meeting. Please try again.',
+        description: error.message || 'Failed to create meeting. Please try again.',
         variant: 'error'
       });
     } finally {
@@ -127,7 +186,42 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   const startInstantMeeting = async () => {
-    await createMeeting(true);
+    if (isStartingMeeting || isCreatingMeeting || isJoiningMeeting) return;
+
+    setIsStartingMeeting(true);
+
+    try {
+      const newMeeting = await api.post('/meetings', {
+        title: `Instant Meeting - ${new Date().toLocaleTimeString()}`,
+        scheduledAt: null
+      });
+
+      const meetingId = getMeetingId(newMeeting);
+
+      if (!meetingId) {
+        throw new Error('Meeting ID missing from create meeting response');
+      }
+
+      setHasManuallyLeftMeeting(false);
+      routeJoinRef.current = meetingId;
+      setActiveMeeting(newMeeting);
+
+      await joinMeeting(meetingId, { replace: true });
+    } catch (error) {
+      console.error('Instant meeting failed:', error);
+      routeJoinRef.current = null;
+      cleanupSocketListeners();
+      cleanupMedia();
+      resetMeetingUiState();
+      clearStoredMeetingState();
+      toast({
+        title: 'Meeting not started',
+        description: error.message || 'Failed to start an instant meeting. Please try again.',
+        variant: 'error'
+      });
+    } finally {
+      setIsStartingMeeting(false);
+    }
   };
 
   const joinMeetingByLink = async () => {
@@ -152,39 +246,78 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
       console.error('Error joining meeting:', error);
       toast({
         title: 'Meeting not joined',
-        description: 'Failed to join meeting. Please check the meeting ID and try again.',
+        description: error.message || 'Failed to join meeting. Please check the meeting ID and try again.',
         variant: 'error'
       });
     }
   };
 
-  const joinMeeting = async (meetingId) => {
+  const joinMeeting = async (meetingId, options = {}) => {
+    const normalizedMeetingId = typeof meetingId === 'string' ? meetingId.trim() : meetingId;
+
+    if (!normalizedMeetingId || isLeavingRef.current) {
+      return null;
+    }
+
     try {
-      const response = await api.post(`/meetings/${meetingId}/join`);
+      setIsJoiningMeeting(true);
+      setHasManuallyLeftMeeting(false);
+
+      const response = await api.post(`/meetings/${normalizedMeetingId}/join`);
       const meeting = response;
-      setActiveMeeting(meeting);
+      const joinedMeetingId = getMeetingId(meeting) || normalizedMeetingId;
+
+      if (!joinedMeetingId) {
+        throw new Error('Meeting ID missing from join meeting response');
+      }
+
+      const joinedMeeting = {
+        ...meeting,
+        meetingId: meeting.meetingId || joinedMeetingId
+      };
+
+      routeJoinRef.current = joinedMeetingId;
+
+      const socketConnected = await emitMeetingEvent('join_meeting', { meetingId: joinedMeetingId });
+      if (!socketConnected) {
+        throw new Error('Could not establish real-time connection. Please refresh and try again.');
+      }
+
+      setActiveMeeting(joinedMeeting);
       setIsInMeeting(true);
-      navigate(`/meeting/${meeting.meetingId}`, { replace: Boolean(meetingIdFromRoute) });
-      await emitMeetingEvent('join_meeting', { meetingId: meeting.meetingId });
+      navigate(`/meeting/${joinedMeetingId}`, {
+        replace: options.replace ?? Boolean(meetingIdFromRoute)
+      });
+
+      return joinedMeeting;
     } catch (error) {
       console.error('Error joining meeting:', error);
+      routeJoinRef.current = null;
       throw error;
+    } finally {
+      setIsJoiningMeeting(false);
     }
   };
 
   const leaveMeeting = async () => {
-    const meetingId = activeMeeting?.meetingId || meetingIdFromRoute;
+    const meetingId = getMeetingId(activeMeeting) || meetingIdFromRoute;
+    if (!meetingId) return;
+
+    // Prevent duplicate leave calls
+    if (isLeavingRef.current) return;
+    isLeavingRef.current = true;
+    setHasManuallyLeftMeeting(true);
     routeJoinRef.current = null;
+
+    cleanupSocketListeners();
     cleanupMedia();
-    setIsInMeeting(false);
-    setActiveMeeting(null);
-    navigate('/chat?tab=meetings', { replace: true });
+    resetMeetingUiState();
+    clearStoredMeetingState();
+    navigate('/meeting', { replace: true, state: { fromMeetingLeave: true } });
 
     try {
-      if (meetingId) {
-        await api.post(`/meetings/${meetingId}/leave`);
-        await emitMeetingEvent('leave_meeting', { meetingId });
-      }
+      await emitMeetingEvent('leave_meeting', { meetingId });
+      await api.post(`/meetings/${meetingId}/leave`);
     } catch (error) {
       console.error('Error leaving meeting:', error);
       toast({
@@ -193,24 +326,41 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
         variant: 'error'
       });
     } finally {
-      void fetchMeetings();
+      await fetchMeetings();
+      isLeavingRef.current = false;
     }
   };
 
   const endMeeting = async () => {
-    const meetingId = activeMeeting?.meetingId || meetingIdFromRoute;
+    const meetingId = getMeetingId(activeMeeting) || meetingIdFromRoute;
     if (!meetingId) return;
 
+    // Prevent duplicate end calls
+    if (isLeavingRef.current) return;
+
+    isLeavingRef.current = true;
+    setHasManuallyLeftMeeting(true);
+    routeJoinRef.current = null;
+
+    cleanupSocketListeners();
+    cleanupMedia();
+    resetMeetingUiState();
+    clearStoredMeetingState();
+    navigate('/meeting', { replace: true, state: { fromMeetingEnd: true } });
+
     try {
+      await emitMeetingEvent('leave_meeting', { meetingId });
       await api.post(`/meetings/${meetingId}/end`);
-      cleanupMedia();
-      setIsInMeeting(false);
-      setActiveMeeting(null);
-      routeJoinRef.current = null;
-      navigate('/chat?tab=meetings', { replace: true });
-      void fetchMeetings();
     } catch (error) {
       console.error('Error ending meeting:', error);
+      toast({
+        title: 'Meeting ended locally',
+        description: 'The meeting screen closed, but the server could not confirm the end event.',
+        variant: 'error'
+      });
+    } finally {
+      await fetchMeetings();
+      isLeavingRef.current = false;
     }
   };
 
@@ -227,7 +377,7 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
     }
   };
 
-  const initializeMedia = async () => {
+  const initializeMedia = async (seq) => {
     if (!navigator.mediaDevices?.getUserMedia) {
       setIsAudioEnabled(false);
       setIsVideoEnabled(false);
@@ -240,6 +390,10 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
     }
 
     const attachStream = (stream) => {
+      if (seq !== mediaInitSeqRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       localStreamRef.current = stream;
       setIsAudioEnabled(stream.getAudioTracks().some((track) => track.enabled));
       setIsVideoEnabled(stream.getVideoTracks().some((track) => track.enabled));
@@ -705,7 +859,7 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
           <button
             onClick={startInstantMeeting}
-            disabled={isCreatingMeeting}
+            disabled={isCreatingMeeting || isStartingMeeting}
             className="h-64 p-8 bg-gradient-to-br from-indigo-600/90 to-violet-600/90 backdrop-blur-2xl border border-white/10 rounded-[2.5rem] hover:shadow-2xl hover:shadow-indigo-500/30 transition-all text-left group relative overflow-hidden disabled:opacity-50 disabled:cursor-not-allowed flex flex-col justify-between"
           >
             <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
@@ -717,7 +871,7 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
             
             <div className="relative z-10">
               <h3 className="text-2xl font-bold text-white mb-2">
-                {isCreatingMeeting ? 'Starting...' : 'Instant Meeting'}
+                {isStartingMeeting ? 'Starting...' : 'Instant Meeting'}
               </h3>
               <p className="text-indigo-100/80 font-medium">Start a call right now</p>
             </div>
@@ -843,7 +997,7 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
                 </button>
                 <button
                   onClick={() => createMeeting(false)}
-                  disabled={isCreatingMeeting}
+                  disabled={isCreatingMeeting || isStartingMeeting}
                   className="flex-1 px-4 py-4 bg-indigo-600 hover:bg-indigo-500 border border-indigo-500/50 rounded-2xl transition-all text-white font-medium disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-indigo-500/20"
                 >
                   {isCreatingMeeting ? 'Creating...' : 'Create & Join'}

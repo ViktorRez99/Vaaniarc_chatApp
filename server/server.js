@@ -170,6 +170,7 @@ const Room = require('./models/Room');
 const Channel = require('./models/Channel');
 const Message = require('./models/Message');
 const Meeting = require('./models/Meeting');
+const Device = require('./models/Device');
 
 const PRESENCE_HEARTBEAT_TTL_MS = Number.parseInt(process.env.PRESENCE_HEARTBEAT_TTL_MS || '', 10) || 90000;
 const PRESENCE_HEARTBEAT_WRITE_INTERVAL_MS = 60000;
@@ -197,10 +198,15 @@ const touchPresenceHeartbeat = async (socket) => {
     lastSeen: new Date(now)
   }).catch((err) => logger.error('Presence heartbeat update error', err));
 
-  if (socket.device) {
-    socket.device.lastActive = new Date(now);
-    socket.device.lastIp = socket.handshake.address || socket.device.lastIp;
-    socket.device.save().catch((err) => logger.error('Device heartbeat update error', err));
+  if (socket.device && socket.device._id) {
+    const nextLastActive = new Date(now);
+    const nextLastIp = socket.handshake.address || socket.device.lastIp;
+    socket.device.lastActive = nextLastActive;
+    socket.device.lastIp = nextLastIp;
+    Device.updateOne(
+      { _id: socket.device._id },
+      { $set: { lastActive: nextLastActive, lastIp: nextLastIp } }
+    ).catch((err) => logger.error('Device heartbeat update error', err));
   }
 };
 
@@ -298,6 +304,75 @@ const loadTypingRoomMembers = (roomId) => cacheService.memory.remember(
   }
 );
 
+const PRIVATE_CALL_TIMEOUT_MS = 30000;
+const activePrivateCalls = new Map();
+const activePrivateCallByUser = new Map();
+
+const getPrivateCallUserIds = (callInfo) => [
+  normalizeId(callInfo?.callerId),
+  normalizeId(callInfo?.receiverId)
+].filter(Boolean);
+
+const emitPrivateCallEvent = (ioInstance, userId, eventName, payload) => {
+  const normalizedUserId = normalizeId(userId);
+  if (!normalizedUserId) {
+    return;
+  }
+
+  emitSocketEvent(ioInstance.to(`user:${normalizedUserId}`), eventName, payload);
+};
+
+const emitPrivateCallEventToParticipants = (ioInstance, callInfo, eventName, extraPayload = {}) => {
+  const payload = {
+    callId: callInfo.callId,
+    conversationId: callInfo.conversationId,
+    chatId: callInfo.chatId,
+    callerId: callInfo.callerId,
+    receiverId: callInfo.receiverId,
+    callerName: callInfo.callerName,
+    callerAvatar: callInfo.callerAvatar,
+    callType: callInfo.callType,
+    createdAt: callInfo.createdAt,
+    ...extraPayload
+  };
+
+  getPrivateCallUserIds(callInfo).forEach((participantId) => {
+    emitPrivateCallEvent(ioInstance, participantId, eventName, payload);
+  });
+};
+
+const clearPrivateCall = (callId) => {
+  const normalizedCallId = normalizeId(callId);
+  const callInfo = activePrivateCalls.get(normalizedCallId);
+
+  if (!callInfo) {
+    return;
+  }
+
+  if (callInfo.timeoutId) {
+    clearTimeout(callInfo.timeoutId);
+  }
+
+  getPrivateCallUserIds(callInfo).forEach((participantId) => {
+    if (activePrivateCallByUser.get(participantId) === normalizedCallId) {
+      activePrivateCallByUser.delete(participantId);
+    }
+  });
+
+  activePrivateCalls.delete(normalizedCallId);
+};
+
+const getPrivateCallPeerId = (callInfo, userId) => {
+  const normalizedUserId = normalizeId(userId);
+  if (normalizedUserId === normalizeId(callInfo.callerId)) {
+    return callInfo.receiverId;
+  }
+  if (normalizedUserId === normalizeId(callInfo.receiverId)) {
+    return callInfo.callerId;
+  }
+  return null;
+};
+
 io.use(socketAuth);
 
 io.on('connection', (socket) => {
@@ -315,14 +390,20 @@ io.on('connection', (socket) => {
   });
 
   socket.join(userSocketRoom);
+  socket.join(normalizeId(userId));
   if (deviceSocketRoom) {
     socket.join(deviceSocketRoom);
   }
 
-  if (socket.device) {
-    socket.device.lastActive = new Date();
-    socket.device.lastIp = socket.handshake.address || socket.device.lastIp;
-    socket.device.save().catch((err) => logger.error('Device activity update error', err));
+  if (socket.device && socket.device._id) {
+    const nextLastActive = new Date();
+    const nextLastIp = socket.handshake.address || socket.device.lastIp;
+    socket.device.lastActive = nextLastActive;
+    socket.device.lastIp = nextLastIp;
+    Device.updateOne(
+      { _id: socket.device._id },
+      { $set: { lastActive: nextLastActive, lastIp: nextLastIp } }
+    ).catch((err) => logger.error('Device activity update error', err));
   }
 
   socket.on('heartbeat', () => {
@@ -540,6 +621,290 @@ io.on('connection', (socket) => {
       logger.error('Call request error', err);
     }
   });
+
+  const handleStartPrivateCall = async (data = {}) => {
+    try {
+      const {
+        callId,
+        conversationId,
+        chatId = conversationId,
+        receiverId,
+        recipientId = receiverId,
+        callType = 'audio',
+        offer
+      } = data;
+
+      const normalizedCallId = normalizeId(callId);
+      const normalizedChatId = normalizeId(chatId);
+      const normalizedCallerId = normalizeId(userId);
+      const normalizedReceiverId = normalizeId(recipientId);
+
+      if (!normalizedCallId || !normalizedChatId || !normalizedReceiverId) {
+        return socket.emit('error', { message: 'Invalid call request' });
+      }
+
+      const chat = await Chat.findById(normalizedChatId);
+      if (
+        !chat
+        || !arrayIncludesId(chat.participants, normalizedCallerId)
+        || !arrayIncludesId(chat.participants, normalizedReceiverId)
+        || normalizedCallerId === normalizedReceiverId
+      ) {
+        return socket.emit('error', { message: 'Call access denied' });
+      }
+
+      const duplicateCall = activePrivateCalls.get(normalizedCallId);
+      if (duplicateCall) {
+        if (
+          duplicateCall.callerId === normalizedCallerId
+          && duplicateCall.receiverId === normalizedReceiverId
+          && duplicateCall.conversationId === normalizedChatId
+        ) {
+          socket.join(`private-call:${normalizedCallId}`);
+          return;
+        }
+
+        return emitPrivateCallEvent(io, normalizedCallerId, 'private-call-busy', {
+          callId: normalizedCallId,
+          conversationId: normalizedChatId,
+          chatId: normalizedChatId,
+          receiverId: normalizedReceiverId,
+          reason: 'call_id_in_use'
+        });
+      }
+
+      let existingCallerCall = activePrivateCallByUser.get(normalizedCallerId);
+      let existingReceiverCall = activePrivateCallByUser.get(normalizedReceiverId);
+
+      if (existingCallerCall && !activePrivateCalls.has(existingCallerCall)) {
+        activePrivateCallByUser.delete(normalizedCallerId);
+        existingCallerCall = null;
+      }
+
+      if (existingReceiverCall && !activePrivateCalls.has(existingReceiverCall)) {
+        activePrivateCallByUser.delete(normalizedReceiverId);
+        existingReceiverCall = null;
+      }
+
+      if (existingCallerCall || existingReceiverCall) {
+        return emitPrivateCallEvent(io, normalizedCallerId, 'private-call-busy', {
+          callId: normalizedCallId,
+          conversationId: normalizedChatId,
+          chatId: normalizedChatId,
+          callerId: normalizedCallerId,
+          receiverId: normalizedReceiverId,
+          reason: existingCallerCall ? 'caller_busy' : 'receiver_busy'
+        });
+      }
+
+      const createdAt = new Date().toISOString();
+      const callInfo = {
+        callId: normalizedCallId,
+        conversationId: normalizedChatId,
+        chatId: normalizedChatId,
+        callerId: normalizedCallerId,
+        receiverId: normalizedReceiverId,
+        callerName: socket.user.username,
+        callerAvatar: socket.user.avatar,
+        callType: callType === 'video' ? 'video' : 'audio',
+        offer,
+        createdAt,
+        status: 'ringing',
+        timeoutId: null
+      };
+
+      callInfo.timeoutId = setTimeout(() => {
+        const activeCall = activePrivateCalls.get(normalizedCallId);
+        if (!activeCall || activeCall.status !== 'ringing') {
+          return;
+        }
+
+        emitPrivateCallEventToParticipants(io, activeCall, 'private-call-missed', {
+          reason: 'timeout'
+        });
+        clearPrivateCall(normalizedCallId);
+      }, PRIVATE_CALL_TIMEOUT_MS);
+
+      activePrivateCalls.set(normalizedCallId, callInfo);
+      activePrivateCallByUser.set(normalizedCallerId, normalizedCallId);
+      activePrivateCallByUser.set(normalizedReceiverId, normalizedCallId);
+      socket.join(`private-call:${normalizedCallId}`);
+
+      emitPrivateCallEvent(io, normalizedReceiverId, 'incoming-call', {
+        callId: normalizedCallId,
+        conversationId: normalizedChatId,
+        chatId: normalizedChatId,
+        callerId: normalizedCallerId,
+        receiverId: normalizedReceiverId,
+        callerName: callInfo.callerName,
+        callerAvatar: callInfo.callerAvatar,
+        callType: callInfo.callType,
+        offer,
+        createdAt
+      });
+
+      emitPrivateCallEvent(io, normalizedCallerId, 'call-ringing', {
+        callId: normalizedCallId,
+        conversationId: normalizedChatId,
+        chatId: normalizedChatId,
+        receiverId: normalizedReceiverId,
+        callType: callInfo.callType,
+        createdAt
+      });
+    } catch (err) {
+      logger.error('Private call request error', err);
+      socket.emit('error', { message: 'Failed to initiate call' });
+    }
+  };
+
+  const handleAcceptPrivateCall = async (data = {}) => {
+    try {
+      const { callId, answer } = data;
+      const normalizedCallId = normalizeId(callId);
+      const callInfo = activePrivateCalls.get(normalizedCallId);
+
+      if (!callInfo || normalizeId(userId) !== normalizeId(callInfo.receiverId)) {
+        return;
+      }
+
+      callInfo.status = 'accepted';
+      if (callInfo.timeoutId) {
+        clearTimeout(callInfo.timeoutId);
+        callInfo.timeoutId = null;
+      }
+      socket.join(`private-call:${normalizedCallId}`);
+
+      emitPrivateCallEventToParticipants(io, callInfo, 'private-call-accepted');
+      emitPrivateCallEvent(io, callInfo.callerId, 'webrtc-answer', {
+        callId: callInfo.callId,
+        conversationId: callInfo.conversationId,
+        chatId: callInfo.chatId,
+        answer,
+        from: normalizeId(userId)
+      });
+    } catch (err) {
+      logger.error('Private call accept error', err);
+    }
+  };
+
+  const handleRejectPrivateCall = async (data = {}) => {
+    try {
+      const { callId, reason = 'user_rejected' } = data;
+      const normalizedCallId = normalizeId(callId);
+      const callInfo = activePrivateCalls.get(normalizedCallId);
+      if (!callInfo) {
+        return;
+      }
+
+      const targetUserId = getPrivateCallPeerId(callInfo, userId);
+      if (!targetUserId) {
+        return;
+      }
+
+      emitPrivateCallEvent(io, targetUserId, reason === 'busy' ? 'private-call-busy' : 'private-call-rejected', {
+        callId: callInfo.callId,
+        conversationId: callInfo.conversationId,
+        chatId: callInfo.chatId,
+        callerId: callInfo.callerId,
+        receiverId: callInfo.receiverId,
+        callType: callInfo.callType,
+        reason
+      });
+
+      clearPrivateCall(normalizedCallId);
+    } catch (err) {
+      logger.error('Private call reject error', err);
+    }
+  };
+
+  const handleMissedPrivateCall = async (data = {}) => {
+    try {
+      const normalizedCallId = normalizeId(data.callId);
+      const callInfo = activePrivateCalls.get(normalizedCallId);
+      if (!callInfo || !getPrivateCallPeerId(callInfo, userId)) {
+        return;
+      }
+
+      emitPrivateCallEventToParticipants(io, callInfo, 'private-call-missed', {
+        reason: data.reason || 'timeout'
+      });
+      clearPrivateCall(normalizedCallId);
+    } catch (err) {
+      logger.error('Private call missed error', err);
+    }
+  };
+
+  const handleEndPrivateCall = async (data = {}) => {
+    try {
+      const { callId, reason = 'call_ended' } = data;
+      const normalizedCallId = normalizeId(callId);
+      const callInfo = activePrivateCalls.get(normalizedCallId);
+      if (!callInfo) {
+        return;
+      }
+
+      if (!getPrivateCallPeerId(callInfo, userId)) {
+        return;
+      }
+
+      emitPrivateCallEventToParticipants(io, callInfo, 'private-call-ended', {
+        reason,
+        from: normalizeId(userId)
+      });
+      emitPrivateCallEventToParticipants(io, callInfo, 'call-ended', {
+        reason,
+        from: normalizeId(userId)
+      });
+
+      clearPrivateCall(normalizedCallId);
+    } catch (err) {
+      logger.error('Private call end error', err);
+    }
+  };
+
+  const handlePrivateCallIceCandidate = async (data = {}) => {
+    try {
+      const { callId, candidate } = data;
+      const normalizedCallId = normalizeId(callId);
+      const callInfo = activePrivateCalls.get(normalizedCallId);
+      const targetUserId = callInfo ? getPrivateCallPeerId(callInfo, userId) : null;
+
+      if (!callInfo || !targetUserId || !candidate) {
+        return;
+      }
+
+      emitPrivateCallEvent(io, targetUserId, 'webrtc-ice-candidate', {
+        callId: callInfo.callId,
+        conversationId: callInfo.conversationId,
+        chatId: callInfo.chatId,
+        candidate,
+        from: normalizeId(userId)
+      });
+    } catch (err) {
+      logger.error('Private call ICE candidate error', err);
+    }
+  };
+
+  socket.on('private-call-start', handleStartPrivateCall);
+  socket.on('start-private-call', handleStartPrivateCall);
+  socket.on('voice_call_request', (data) => handleStartPrivateCall({
+    ...data,
+    conversationId: data?.conversationId || data?.chatId,
+    receiverId: data?.receiverId || data?.recipientId
+  }));
+  socket.on('private-call-accepted', handleAcceptPrivateCall);
+  socket.on('accept-call', handleAcceptPrivateCall);
+  socket.on('voice_call_answer', handleAcceptPrivateCall);
+  socket.on('private-call-rejected', handleRejectPrivateCall);
+  socket.on('reject-call', handleRejectPrivateCall);
+  socket.on('voice_call_rejected', handleRejectPrivateCall);
+  socket.on('private-call-missed', handleMissedPrivateCall);
+  socket.on('call-missed', handleMissedPrivateCall);
+  socket.on('private-call-ended', handleEndPrivateCall);
+  socket.on('end-call', handleEndPrivateCall);
+  socket.on('voice_call_ended', handleEndPrivateCall);
+  socket.on('webrtc-ice-candidate', handlePrivateCallIceCandidate);
+  socket.on('voice_call_ice_candidate', handlePrivateCallIceCandidate);
 
   socket.on('mark_read', async (data) => {
     try {
@@ -1081,6 +1446,26 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', async () => {
     logger.info('User disconnected', { username: socket.user.username, socketId: socket.id });
+    const activeCallId = activePrivateCallByUser.get(normalizeId(userId));
+    const activeCall = activePrivateCalls.get(activeCallId);
+    if (activeCall) {
+      const peerId = getPrivateCallPeerId(activeCall, userId);
+      if (peerId) {
+        const disconnectPayload = {
+          callId: activeCall.callId,
+          conversationId: activeCall.conversationId,
+          chatId: activeCall.chatId,
+          callerId: activeCall.callerId,
+          receiverId: activeCall.receiverId,
+          callType: activeCall.callType,
+          reason: 'peer_disconnected',
+          from: normalizeId(userId)
+        };
+        emitPrivateCallEvent(io, peerId, 'private-call-ended', disconnectPayload);
+        emitPrivateCallEvent(io, peerId, 'call-ended', disconnectPayload);
+      }
+      clearPrivateCall(activeCallId);
+    }
     const offlineTimer = setTimeout(() => {
       markUserOfflineIfStale(userId, socket.user.username).catch((err) => logger.error('Disconnect presence update error', err));
     }, 35000);

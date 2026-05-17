@@ -683,7 +683,7 @@ router.post('/rooms/:roomId/messages', async (req, res) => {
       messageType,
       isPrivate: false,
       replyTo: replyTo || null,
-      forwardedFrom: normalizedForwardedFrom,
+      ...(normalizedForwardedFrom ? { forwardedFrom: normalizedForwardedFrom } : {}),
       tempId: tempId || null,
       ...privacyFields
     });

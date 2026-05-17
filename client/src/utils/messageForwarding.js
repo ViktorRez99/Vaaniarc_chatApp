@@ -54,6 +54,28 @@ export const isForwardablePlaintextMessage = (message) => (
   && Boolean(getMessageTextContent(message))
 );
 
+export const isForwardedMessage = (message) => {
+  const forwardedFrom = message?.forwardedFrom;
+  if (!forwardedFrom || typeof forwardedFrom !== 'object') {
+    return false;
+  }
+  return Boolean(
+    forwardedFrom.originalMessageId
+    || forwardedFrom.originalSender
+    || forwardedFrom.originalSenderName
+    || forwardedFrom.sourceId
+  );
+};
+
+export const getForwardedFromLabel = (message) => {
+  const forwardedFrom = message?.forwardedFrom;
+  if (!forwardedFrom) return 'Unknown';
+  return forwardedFrom.originalSenderName
+    || forwardedFrom.originalSender?.username
+    || (typeof forwardedFrom.originalSender === 'string' ? '' : '')
+    || 'Unknown';
+};
+
 export const buildForwardedFromPayload = (message, sourceType, sourceId) => ({
   originalMessageId: normalizeId(message?._id),
   originalSender: normalizeId(message?.sender?._id || message?.sender),

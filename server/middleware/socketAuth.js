@@ -16,8 +16,9 @@ const socketAuth = async (socket, next) => {
       : (socket.handshake.address || 'unknown');
     const requestedDeviceId = typeof socket.handshake.headers['x-device-id'] === 'string'
       ? socket.handshake.headers['x-device-id'].trim()
-      : 'unknown-device';
-    const rateLimitKey = `socket-auth::${remoteAddress}::${requestedDeviceId}`;
+      : (typeof socket.handshake.auth?.deviceId === 'string' ? socket.handshake.auth.deviceId.trim() : '');
+    const rateLimitDeviceId = requestedDeviceId || 'unknown-device';
+    const rateLimitKey = `socket-auth::${remoteAddress}::${rateLimitDeviceId}`;
     const { count: attempts } = await cacheService.rateLimit.increment(rateLimitKey, 15 * 60 * 1000);
 
     if (attempts > 10) {
@@ -42,7 +43,24 @@ const socketAuth = async (socket, next) => {
     socket.username = authContext.user.username;
     socket.user = authContext.user;
     socket.session = authContext.session;
-    socket.deviceId = authContext.session.deviceId || null;
+    let resolvedDeviceId = authContext.session.deviceId || null;
+    if (requestedDeviceId && requestedDeviceId !== resolvedDeviceId) {
+      const requestedDevice = await Device.findOne({
+        deviceId: requestedDeviceId,
+        user: authContext.user._id,
+        revokedAt: null
+      }).select('_id');
+
+      if (requestedDevice) {
+        await authenticateToken.updateRequestSessionDeviceId(
+          { session: authContext.session },
+          requestedDeviceId
+        );
+        resolvedDeviceId = requestedDeviceId;
+      }
+    }
+
+    socket.deviceId = resolvedDeviceId;
 
     if (socket.deviceId) {
       const device = await Device.findOne({

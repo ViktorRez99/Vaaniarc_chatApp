@@ -10,16 +10,5 @@ services:
     volumes:
       - mongodb-data:/data/db
 
-  redis:
-    image: redis:7-alpine
-    container_name: vaaniarc-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis-data:/data
-
 volumes:
   mongodb-data:
-  redis-data:

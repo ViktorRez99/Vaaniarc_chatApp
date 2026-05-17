@@ -103,7 +103,7 @@ const buildEncryptedPayload = (type = 'text') => JSON.stringify({
   version: 2,
   protocolVersion: 2,
   type,
-  algorithm: 'X25519-sealedbox+XSalsa20-Poly1305',
+  algorithm: 'secretbox+sealed-box+ed25519',
   senderUserId: userA,
   senderDeviceId: deviceA,
   senderFingerprint: 'fingerprint-a',
@@ -113,8 +113,45 @@ const buildEncryptedPayload = (type = 'text') => JSON.stringify({
   metadataNonce: type === 'file' ? 'metadata-nonce' : undefined,
   metadataCiphertext: type === 'file' ? 'metadata-ciphertext' : undefined,
   envelopes: [
-    { deviceId: deviceA, wrappedKey: 'self-key' },
-    { deviceId: deviceB, wrappedKey: 'peer-key' }
+    { userId: userA, deviceId: deviceA, wrappedKey: 'self-key' },
+    { userId: userB, deviceId: deviceB, wrappedKey: 'peer-key' }
+  ]
+});
+
+const buildDirectSessionPayload = (type = 'text') => JSON.stringify({
+  version: 5,
+  protocolVersion: 5,
+  type,
+  algorithm: 'x3dh-ml-kem1024-hybrid-secretbox-sealed-ratchet-v3',
+  senderUserId: userA,
+  senderDeviceId: deviceA,
+  senderFingerprint: 'fingerprint-a',
+  dataNonce: type === 'file' ? 'file-nonce' : undefined,
+  envelopes: [
+    {
+      userId: userA,
+      deviceId: deviceA,
+      mode: 'session',
+      counter: 0,
+      nonce: 'self-envelope-nonce',
+      ciphertext: 'self-envelope-ciphertext',
+      ratchet: {
+        ciphertext: 'self-ratchet-ciphertext',
+        commitment: 'self-ratchet-commitment'
+      }
+    },
+    {
+      userId: userB,
+      deviceId: deviceB,
+      mode: 'session',
+      counter: 0,
+      nonce: 'peer-envelope-nonce',
+      ciphertext: 'peer-envelope-ciphertext',
+      ratchet: {
+        ciphertext: 'peer-ratchet-ciphertext',
+        commitment: 'peer-ratchet-commitment'
+      }
+    }
   ]
 });
 
@@ -327,6 +364,94 @@ describe('socket messaging smoke checks', () => {
     } finally {
       socket.close();
     }
+  });
+
+  test('still accepts direct-session socket messages from existing clients', async () => {
+    const socket = await connectSocket(port);
+    const encryptedContent = buildDirectSessionPayload('text');
+
+    try {
+      const ackPromise = waitForDecodedEvent(socket, 'message_sent');
+      socket.emit('private_message', encode({
+        chatId,
+        content: '[Encrypted message]',
+        encryptedContent,
+        messageType: 'text',
+        tempId: 'smoke-v5-direct-message'
+      }));
+
+      const ack = await ackPromise;
+
+      expect(ack.tempId).toBe('smoke-v5-direct-message');
+      expect(savedPrivateMessages).toHaveLength(1);
+      expect(savedPrivateMessages[0].protocolVersion).toBe(5);
+    } finally {
+      socket.close();
+    }
+  });
+});
+
+describe('REST direct messaging smoke checks', () => {
+  test('accepts an encrypted direct REST message', async () => {
+    const encryptedContent = buildEncryptedPayload('text');
+
+    const response = await request(app)
+      .post(`/api/chats/${chatId}/messages`)
+      .send({
+        content: '[Encrypted message]',
+        encryptedContent,
+        messageType: 'text',
+        tempId: 'smoke-rest-direct-message'
+      });
+
+    expect(response.status).toBe(201);
+    expect(savedPrivateMessages).toHaveLength(1);
+    expect(savedPrivateMessages[0].content).toBe('[Encrypted message]');
+    expect(savedPrivateMessages[0].encryptedContent).toBe(encryptedContent);
+    expect(savedPrivateMessages[0].protocolVersion).toBe(2);
+  });
+
+  test('does not fail the REST send when realtime fanout throws after persistence', async () => {
+    const originalIo = app.get('io');
+    const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const encryptedContent = buildEncryptedPayload('text');
+    app.set('io', {
+      to: () => ({
+        emit: () => {
+          throw new Error('forced realtime fanout failure');
+        }
+      })
+    });
+
+    try {
+      const response = await request(app)
+        .post(`/api/chats/${chatId}/messages`)
+        .send({
+          content: '[Encrypted message]',
+          encryptedContent,
+          messageType: 'text',
+          tempId: 'smoke-rest-fanout-failure'
+        });
+
+      expect(response.status).toBe(201);
+      expect(savedPrivateMessages).toHaveLength(1);
+    } finally {
+      app.set('io', originalIo);
+      consoleErrorSpy.mockRestore();
+    }
+  });
+
+  test('returns a request error instead of a 500 for invalid chat ids', async () => {
+    const response = await request(app)
+      .post('/api/chats/not-a-chat-id/messages')
+      .send({
+        content: '[Encrypted message]',
+        encryptedContent: buildEncryptedPayload('text'),
+        messageType: 'text'
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ message: 'Invalid chat id.' });
   });
 });
 

@@ -14,11 +14,17 @@ import api from '../services/api';
 import { AppShell, Avatar } from './ui';
 import { cn } from '../lib/utils';
 
+const resolveActiveTab = (pathname, search, meetingId) => {
+  const sp = new URLSearchParams(search);
+  const isMeetingRoute = pathname === '/meeting' || Boolean(meetingId);
+  return isMeetingRoute || sp.get('tab') === 'meetings' ? 'meetings' : 'chats';
+};
+
 const ChatHub = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { meetingId } = useParams();
-  const [activeTab, setActiveTab] = useState('chats');
+  const [activeTab, setActiveTab] = useState(() => resolveActiveTab(location.pathname, location.search, meetingId));
   const { user, logout } = useAuth();
   const meetingsPageRef = useRef(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -30,9 +36,8 @@ const ChatHub = () => {
 
   useEffect(() => { if (user?.status) setCurrentStatus(user.status) }, [user]);
   useEffect(() => {
-    const sp = new URLSearchParams(location.search);
-    setActiveTab(meetingId || sp.get('tab') === 'meetings' ? 'meetings' : 'chats');
-  }, [location.search, meetingId]);
+    setActiveTab(resolveActiveTab(location.pathname, location.search, meetingId));
+  }, [location.pathname, location.search, meetingId]);
 
   const handleStatusChange = async (status) => {
     setCurrentStatus(status); setShowStatusMenu(false);
