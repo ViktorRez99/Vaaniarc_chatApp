@@ -542,6 +542,11 @@ export const AuthProvider = ({ children }) => {
     setSessionRestoreMessage('');
 
     const restorePromise = (async () => {
+      if (!apiService.hasCsrfToken()) {
+        markSessionMissing();
+        return null;
+      }
+
       const completeSessionRestore = async () => {
         const response = await apiService.verifyToken();
 

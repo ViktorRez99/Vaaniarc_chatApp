@@ -2689,6 +2689,34 @@ const cryptoService = {
     return normalizedUserIds.length === 2 && normalizedUserIds.includes(this.activeUserId);
   },
 
+  async canEncryptForUsers(userIds = []) {
+    const normalizedUserIds = uniqueUserIds(userIds);
+    const missingUserIds = [];
+
+    await Promise.all(
+      normalizedUserIds.map(async (userId) => {
+        const deviceBundles = await this.fetchUserDeviceBundles(userId);
+        const hasDeviceKeys = deviceBundles.some(
+          (device) => device?.keyBundle?.encryptionPublicKey
+        );
+
+        if (hasDeviceKeys) {
+          return;
+        }
+
+        const publishedIdentity = await this.fetchPublishedIdentity(userId);
+        if (!publishedIdentity?.publicJwk) {
+          missingUserIds.push(userId);
+        }
+      })
+    );
+
+    return {
+      canEncrypt: missingUserIds.length === 0,
+      missingUserIds
+    };
+  },
+
   async buildDirectTargetDevices(userIds = []) {
     const normalizedUserIds = uniqueUserIds(userIds);
     const bundleCollections = await Promise.all(

@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef, memo, lazy, Suspense } from "react"
 import { useNavigate } from "react-router-dom"
 import { useAuth } from "../context/AuthContext"
-import { motion, useScroll, useTransform, useSpring, useMotionValue } from "framer-motion"
-import { MessageCircle, Video, FolderLock, Shield, ArrowRight, Zap, Menu, Play, Globe, Lock } from "lucide-react"
+import { motion, AnimatePresence, useScroll, useTransform, useSpring, useMotionValue } from "framer-motion"
+import { MessageCircle, Video, FolderLock, Shield, ArrowRight, Zap, Menu, X, Play, Globe, Lock } from "lucide-react"
 
 /* ═══════════════════════════════════════
    LAZY-LOADED: Heavy Chat Card (separate chunk)
@@ -241,6 +241,79 @@ const LandingPage = () => {
           </div>
         </div>
       </motion.header>
+
+      {/* MOBILE MENU */}
+      <AnimatePresence>
+        {mobileMenuOpen && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm"
+              onClick={() => setMobileMenuOpen(false)}
+            />
+            <motion.div
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+              className="fixed top-0 right-0 bottom-0 z-[70] w-72 max-w-[85vw] p-6 flex flex-col"
+              style={{ background: 'rgba(10,10,10,0.95)', borderLeft: '1px solid rgba(255,255,255,0.06)' }}
+            >
+              <div className="flex items-center justify-between mb-10">
+                <span className="text-lg font-bold tracking-tight" style={{ color: '#fff' }}>Menu</span>
+                <button
+                  aria-label="Close navigation menu"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="p-2 transition-colors cursor-pointer bg-transparent border-none"
+                  style={{ color: 'rgba(255,255,255,0.6)' }}
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="flex flex-col gap-4">
+                {!isAuthenticated ? (
+                  <>
+                    <button
+                      onClick={() => { setMobileMenuOpen(false); navigate('/auth') }}
+                      className="w-full text-left px-4 py-3 rounded-xl text-sm font-medium transition-colors cursor-pointer bg-transparent border-none hover:bg-white/5"
+                      style={{ color: 'rgba(255,255,255,0.8)' }}
+                    >
+                      Log In
+                    </button>
+                    <button
+                      onClick={() => { setMobileMenuOpen(false); navigate('/auth?signup=true') }}
+                      className="w-full text-left px-4 py-3 rounded-xl text-sm font-bold text-black transition-colors cursor-pointer border-none"
+                      style={{ background: '#00F0FF', boxShadow: '0 0 20px rgba(0, 240, 255, 0.3)' }}
+                    >
+                      Get Started
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => { setMobileMenuOpen(false); navigate('/chat') }}
+                      className="w-full text-left px-4 py-3 rounded-xl text-sm font-bold text-black transition-colors cursor-pointer border-none"
+                      style={{ background: '#00FF66' }}
+                    >
+                      Go to Chats
+                    </button>
+                    <button
+                      onClick={() => { setMobileMenuOpen(false); logout() }}
+                      className="w-full text-left px-4 py-3 rounded-xl text-sm font-medium transition-colors cursor-pointer bg-transparent border-none hover:bg-white/5"
+                      style={{ color: 'rgba(255,255,255,0.8)' }}
+                    >
+                      Logout
+                    </button>
+                  </>
+                )}
+              </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
 
       {/* ═══════ HERO ═══════ */}
       <section className="relative min-h-screen flex items-center justify-center px-4 pt-24 overflow-hidden">

@@ -5,7 +5,7 @@ import {
   Phone, Video, Info, ArrowLeft, Check, CheckCheck,
   Image as ImageIcon, Mic, X, MessageCircle, Zap,
   Reply, Pencil, Trash2, Pin, Forward, FileText, Users,
-  Lock, AlertCircle, Archive, Inbox
+  Lock, AlertCircle, Archive, Inbox, RefreshCw
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import socketService from '../services/socket';
@@ -83,6 +83,20 @@ const ChatsPage = () => {
       description,
       variant: 'error'
     });
+  };
+
+  const normalizeSendError = (error) => {
+    const message = String(error?.message || error || '');
+    if (/recipient has not set up encryption yet/i.test(message)) {
+      return 'This user has not set up encryption yet. They need to log in before you can message them.';
+    }
+    if (/not finished encryption setup yet/i.test(message)) {
+      return 'One or more participants have not finished encryption setup.';
+    }
+    if (/encryption identity is not ready/i.test(message)) {
+      return 'Your encryption keys are not ready. Please refresh the page and try again.';
+    }
+    return message || 'Failed to send message.';
   };
 
   const scheduleUiTimeout = (callback, delay) => {
@@ -591,6 +605,22 @@ const ChatsPage = () => {
         throw new Error('Chat could not be initialized.');
       }
 
+      // Pre-flight check: ensure all participants have encryption keys
+      const { canEncrypt, missingUserIds } = await cryptoService.canEncryptForUsers([
+        recipient._id,
+        user?._id || user?.id
+      ]);
+
+      if (!canEncrypt) {
+        const recipientName = recipient?.username || 'This user';
+        showChatError(
+          'Cannot send message',
+          `${recipientName} has not set up encryption yet. They need to log in before you can message them.`
+        );
+        setMessageInput(content);
+        return;
+      }
+
       const tempId = `temp-${Date.now()}`;
       pendingTempId = tempId;
       const replyTargetSnapshot = replyTarget;
@@ -671,10 +701,9 @@ const ChatsPage = () => {
             replyTargetSnapshot?._id || null
           );
         } catch (socketError) {
-          const errorMessage = socketError?.message
-            || socketError?.description
-            || restError?.message
-            || 'Failed to send encrypted message.';
+          const errorMessage = normalizeSendError(
+            socketError || restError || 'Failed to send encrypted message.'
+          );
           setMessages(prev => prev.map(message => (
             message.tempId === tempId
               ? { ...message, isSending: false, sendFailed: true, errorMessage }
@@ -684,14 +713,77 @@ const ChatsPage = () => {
       }
     } catch (error) {
       console.error('Error sending message:', error);
+      const friendlyError = normalizeSendError(error);
       if (!pendingTempId) {
-        showChatError('Message not sent', error.message || 'Failed to send encrypted message.');
+        showChatError('Message not sent', friendlyError);
         return;
       }
       setMessages(prev => prev.map(message => (
         pendingTempId && message.tempId === pendingTempId
-          ? { ...message, isSending: false, sendFailed: true, errorMessage: error.message || 'Failed to send encrypted message.' }
+          ? { ...message, isSending: false, sendFailed: true, errorMessage: friendlyError }
           : message
+      )));
+    }
+  };
+
+  const retrySendMessage = async (message) => {
+    if (!message?.tempId || !message?.chatId || message.isSending) {
+      return;
+    }
+
+    const chat = chats.find((c) => idsEqual(c._id, message.chatId)) || { _id: message.chatId };
+    const recipient = getOtherParticipant(chat);
+
+    if (!recipient?._id) {
+      showChatError('Cannot retry', 'Recipient is no longer available.');
+      return;
+    }
+
+    // Mark as retrying
+    setMessages((prev) => prev.map((m) => (
+      m.tempId === message.tempId
+        ? { ...m, isSending: true, sendFailed: false, errorMessage: null }
+        : m
+    )));
+
+    try {
+      const encryptedContent = await cryptoService.encryptTextForUsers(
+        message.content,
+        [recipient._id, user?._id || user?.id]
+      );
+
+      const response = await api.sendChatMessage(message.chatId, {
+        content: cryptoService.encryptedPlaceholder,
+        encryptedContent,
+        messageType: 'text',
+        expiresInSeconds: message.expiresInSeconds || null,
+        tempId: message.tempId,
+        replyTo: message.replyTo?._id || null
+      });
+
+      const persistedMessage = await cryptoService.hydratePrivateMessage(
+        response?.message || response?.data || response
+      );
+
+      if (persistedMessage) {
+        const displayMessage = isEncryptedPlaceholder(persistedMessage)
+          ? { ...persistedMessage, content: message.content, decryptedContent: message.content, decryptFailed: false }
+          : persistedMessage;
+
+        setMessages((prev) => prev.map((m) => (
+          m.tempId === message.tempId
+            ? { ...displayMessage, isOptimistic: false, isSending: false }
+            : m
+        )));
+        fetchChats();
+      }
+    } catch (error) {
+      console.error('Retry send failed:', error);
+      const friendlyError = normalizeSendError(error);
+      setMessages((prev) => prev.map((m) => (
+        m.tempId === message.tempId
+          ? { ...m, isSending: false, sendFailed: true, errorMessage: friendlyError }
+          : m
       )));
     }
   };
@@ -1822,7 +1914,16 @@ const ChatsPage = () => {
                     ) : message.sendFailed ? (
                       <div className="flex items-center gap-2 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-xs text-red-200">
                         <AlertCircle className="h-4 w-4 shrink-0" />
-                        <span>{message.errorMessage || 'Failed to send.'}</span>
+                        <span className="flex-1">{message.errorMessage || 'Failed to send.'}</span>
+                        <button
+                          type="button"
+                          onClick={() => retrySendMessage(message)}
+                          className="ml-1 flex items-center gap-1 rounded px-1.5 py-0.5 transition-colors hover:bg-red-400/20"
+                          title="Retry sending"
+                        >
+                          <RefreshCw className="h-3 w-3" />
+                          <span className="underline">Retry</span>
+                        </button>
                       </div>
                     ) : isEncryptedPlaceholder(message) ? (
                       <div className="flex items-center gap-2 rounded-lg border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">

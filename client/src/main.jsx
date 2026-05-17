@@ -13,6 +13,26 @@ if (isDevLoopbackIp) {
   window.location.replace(localDevUrl.toString())
 }
 
+// Suppress noisy browser extension errors that are outside our control
+window.addEventListener('unhandledrejection', (event) => {
+  const reason = event?.reason;
+  const message = String(
+    reason?.message
+    || reason?.reason?.message
+    || (typeof reason === 'string' ? reason : '')
+    || ''
+  );
+  if (
+    message.includes('message channel closed before a response was received')
+    || message.includes('The message port closed before a response was received')
+    || message.includes('message channel closed')
+    || message.includes('message port closed')
+  ) {
+    event.preventDefault();
+    event.stopImmediatePropagation?.();
+  }
+});
+
 // Global error display fallback (if React crashes entirely)
 window.onerror = function(msg, url, line, col, error) {
   const root = document.getElementById("root");

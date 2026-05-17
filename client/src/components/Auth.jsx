@@ -240,13 +240,15 @@ const FormField = ({ label, type = "text", name, value, onChange, placeholder, r
         <motion.label
           htmlFor={fieldId}
           className="absolute font-mono uppercase tracking-[0.12em] pointer-events-none origin-left z-10"
-          style={{ left: Icon ? 42 : 16 }}
+          style={{
+            left: Icon ? 42 : 16,
+            background: isFloating ? "linear-gradient(180deg, #131318 0%, #0f0f14 100%)" : "transparent",
+          }}
           animate={{
             top: isFloating ? -7 : "50%",
             y: isFloating ? 0 : "-50%",
             fontSize: isFloating ? "9px" : "13px",
             color: shake ? "#FF4466" : focused ? "#00F0FF" : "rgba(255,255,255,0.4)",
-            background: isFloating ? "linear-gradient(180deg, #131318 0%, #0f0f14 100%)" : "transparent",
             paddingLeft: isFloating ? 6 : 0,
             paddingRight: isFloating ? 6 : 0,
           }}
