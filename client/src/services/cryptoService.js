@@ -22,6 +22,7 @@ import {
 import { buildEncryptedAttachmentMetadata } from '../utils/attachmentPreview';
 import {
   deleteDeviceKeyMaterial,
+  deleteDeviceSession,
   deleteDeviceSessionsForDevice,
   loadDeviceKeyMaterial,
   saveDeviceKeyMaterial,
@@ -278,10 +279,10 @@ const cryptoService = {
   },
 
   getCurrentDeviceId() {
-    if (!this.activeDeviceId) {
-      this.activeDeviceId = getOrCreateDeviceId();
+    const currentDeviceId = getOrCreateDeviceId();
+    if (currentDeviceId && currentDeviceId !== this.activeDeviceId) {
+      this.activeDeviceId = currentDeviceId;
     }
-
     return this.activeDeviceId;
   },
 
@@ -1935,18 +1936,20 @@ const cryptoService = {
       normalizedUserIds.map(async (userId) => [userId, await this.fetchUserDeviceBundles(userId)])
     );
 
+    const validBundleCollections = bundleCollections.map(([userId, devices]) => [
+      userId,
+      devices.filter((device) => device?.keyBundle?.encryptionPublicKey)
+    ]);
     const recipientDevices = sortDeviceBundles(
-      bundleCollections.flatMap(([userId, devices]) => (
-        devices
-          .filter((device) => device?.keyBundle?.encryptionPublicKey)
-          .map((device) => ({
-            ...device,
-            userId
-          }))
+      validBundleCollections.flatMap(([userId, devices]) => (
+        devices.map((device) => ({
+          ...device,
+          userId
+        }))
       ))
     );
 
-    const usersWithoutBundles = bundleCollections
+    const usersWithoutBundles = validBundleCollections
       .filter(([, devices]) => !devices.length)
       .map(([userId]) => userId);
 
@@ -2450,8 +2453,11 @@ const cryptoService = {
         )
       };
     } catch (error) {
-      console.error('Failed to decrypt session envelope:', error);
-      return null;
+      return {
+        plaintext: null,
+        staleSession: true,
+        error
+      };
     }
   },
 
@@ -2722,8 +2728,12 @@ const cryptoService = {
     const bundleCollections = await Promise.all(
       normalizedUserIds.map(async (userId) => [userId, await this.fetchUserDeviceBundles(userId, { refresh: true })])
     );
+    const validBundleCollections = bundleCollections.map(([userId, devices]) => [
+      userId,
+      devices.filter((device) => device?.keyBundle?.encryptionPublicKey)
+    ]);
 
-    const usersWithoutBundles = bundleCollections
+    const usersWithoutBundles = validBundleCollections
       .filter(([, devices]) => !devices.length)
       .map(([userId]) => userId);
 
@@ -2732,7 +2742,7 @@ const cryptoService = {
     }
 
     return sortDeviceBundles(
-      bundleCollections.flatMap(([userId, devices]) => devices.map((device) => ({
+      validBundleCollections.flatMap(([userId, devices]) => devices.map((device) => ({
         ...device,
         userId
       })))
@@ -2800,6 +2810,15 @@ const cryptoService = {
 
     const decryptedEnvelope = await this.decryptWithDirectSession(sessionState, targetEnvelope);
     if (!decryptedEnvelope?.plaintext) {
+      if (decryptedEnvelope?.staleSession) {
+        await deleteDeviceSession(
+          this.activeUserId,
+          this.getCurrentDeviceId(),
+          parsedPayload.senderUserId,
+          parsedPayload.senderDeviceId
+        );
+        this.sessionCache.delete(this.deriveSessionCacheKey(parsedPayload.senderUserId, parsedPayload.senderDeviceId));
+      }
       return null;
     }
 
@@ -2847,7 +2866,6 @@ const cryptoService = {
 
   async decryptTextPayloadDirect(parsedPayload) {
     if (!await this.verifyDevicePayloadV2(parsedPayload)) {
-      console.error('Failed to verify direct session payload.');
       return null;
     }
 
@@ -2906,7 +2924,6 @@ const cryptoService = {
 
   async decryptDirectAttachmentBundle(parsedPayload) {
     if (!await this.verifyDevicePayloadV2(parsedPayload)) {
-      console.error('Failed to verify direct attachment payload.');
       return null;
     }
 
@@ -2931,7 +2948,16 @@ const cryptoService = {
 
       return await this.encryptTextForUsersV2(plaintext, userIds);
     } catch (deviceEncryptionError) {
-      console.warn('Falling back to legacy text encryption:', deviceEncryptionError);
+      if (this.isDirectSessionUserSet(userIds)) {
+        try {
+          return await this.encryptTextForUsersV2(plaintext, userIds);
+        } catch (sealedBoxError) {
+          console.warn('Direct session encryption is unavailable; using legacy account-key encryption:', sealedBoxError);
+        }
+      } else {
+        console.warn('Device encryption is unavailable; using legacy account-key encryption:', deviceEncryptionError);
+      }
+
       const { aesKey, envelopes } = await this.buildEnvelopeContext(userIds);
       const encrypted = await this.encryptBytes(aesKey, textEncoder.encode(plaintext));
 
@@ -2982,7 +3008,16 @@ const cryptoService = {
 
       return await this.encryptAttachmentForUsersV2(file, userIds);
     } catch (deviceEncryptionError) {
-      console.warn('Falling back to legacy attachment encryption:', deviceEncryptionError);
+      if (this.isDirectSessionUserSet(userIds)) {
+        try {
+          return await this.encryptAttachmentForUsersV2(file, userIds);
+        } catch (sealedBoxError) {
+          console.warn('Direct attachment encryption is unavailable; using legacy account-key encryption:', sealedBoxError);
+        }
+      } else {
+        console.warn('Device attachment encryption is unavailable; using legacy account-key encryption:', deviceEncryptionError);
+      }
+
       const { aesKey, envelopes } = await this.buildEnvelopeContext(userIds);
       const metadata = await buildEncryptedAttachmentMetadata(file);
 

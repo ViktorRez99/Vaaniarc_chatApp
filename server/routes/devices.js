@@ -3,6 +3,7 @@ const express = require('express');
 
 const router = express.Router();
 const Device = require('../models/Device');
+const authenticateToken = require('../middleware/auth');
 const { appendTransparencyEntry } = require('../services/keyTransparencyService');
 const { logDeviceAdded, logDeviceRemoved } = require('../middleware/auditLog');
 
@@ -54,14 +55,10 @@ router.post('/', async (req, res) => {
     } = req.body;
     const userId = req.user._id;
 
-    const resolvedDeviceId = req.deviceId || deviceId || null;
+    const resolvedDeviceId = deviceId || req.headers[CURRENT_DEVICE_HEADER] || req.deviceId || null;
 
     if (!resolvedDeviceId) {
       return res.status(400).json({ message: 'Device ID is required' });
-    }
-
-    if (deviceId && req.deviceId && deviceId !== req.deviceId) {
-      return res.status(400).json({ message: 'Device ID does not match the authenticated session.' });
     }
 
     const now = new Date();
@@ -84,6 +81,10 @@ router.post('/', async (req, res) => {
         code: 'DEVICE_ID_CLAIMED',
         message: 'Device ID is already linked to another account.'
       });
+    }
+
+    if (req.deviceId !== resolvedDeviceId) {
+      await authenticateToken.updateRequestSessionDeviceId(req, resolvedDeviceId);
     }
 
     let device = await Device.findOne({ deviceId: resolvedDeviceId, user: userId });

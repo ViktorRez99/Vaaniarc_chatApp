@@ -60,10 +60,29 @@ const validateDeviceBoundPayload = ({
   }
 
   if (metadata.protocolVersion < 2) {
+    const hasLegacyTextPayload = parsedPayload?.type === 'text'
+      && typeof parsedPayload?.iv === 'string'
+      && typeof parsedPayload?.ciphertext === 'string'
+      && Array.isArray(parsedPayload?.envelopes)
+      && parsedPayload.envelopes.length > 0;
+    const hasLegacyFilePayload = parsedPayload?.type === 'file'
+      && typeof parsedPayload?.metadataIv === 'string'
+      && typeof parsedPayload?.metadataCiphertext === 'string'
+      && Array.isArray(parsedPayload?.envelopes)
+      && parsedPayload.envelopes.length > 0;
+
+    if (hasLegacyTextPayload || hasLegacyFilePayload) {
+      return {
+        ...metadata,
+        isValid: true,
+        error: null
+      };
+    }
+
     return {
       ...metadata,
       isValid: false,
-      error: 'Encrypted payloads must use protocol version 2 or newer.'
+      error: 'Legacy encrypted payload is malformed.'
     };
   }
 

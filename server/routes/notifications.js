@@ -61,7 +61,11 @@ router.delete('/notifications/subscribe', async (req, res) => {
   try {
     const device = await getCurrentDevice(req);
     if (!device) {
-      return res.status(404).json({ message: 'Current device not found.' });
+      return res.json({
+        message: 'No push subscription was registered for this device.',
+        deviceId: req.deviceId || null,
+        skipped: true
+      });
     }
 
     device.pushSubscription = {

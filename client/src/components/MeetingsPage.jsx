@@ -36,6 +36,7 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   const screenStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
   const timeoutRefs = useRef(new Set());
+  const routeJoinRef = useRef(null);
 
   const scheduleTimeout = (callback, delay) => {
     const timeoutId = window.setTimeout(() => {
@@ -63,9 +64,11 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   }, [user]);
 
   useEffect(() => {
-    if (meetingIdFromRoute && user && !isInMeeting) {
+    if (meetingIdFromRoute && user && !isInMeeting && routeJoinRef.current !== meetingIdFromRoute) {
+      routeJoinRef.current = meetingIdFromRoute;
       joinMeeting(meetingIdFromRoute).catch((error) => {
         console.error('Error joining meeting from route:', error);
+        routeJoinRef.current = null;
       });
     }
   }, [meetingIdFromRoute, user, isInMeeting]);
@@ -161,10 +164,8 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
       const meeting = response;
       setActiveMeeting(meeting);
       setIsInMeeting(true);
-      navigate(`/meeting/${meeting.meetingId}`);
-      
-      // Emit socket event
-      socketService.emit('join_meeting', { meetingId });
+      navigate(`/meeting/${meeting.meetingId}`, { replace: Boolean(meetingIdFromRoute) });
+      await emitMeetingEvent('join_meeting', { meetingId: meeting.meetingId });
     } catch (error) {
       console.error('Error joining meeting:', error);
       throw error;
@@ -172,57 +173,117 @@ const MeetingsPage = forwardRef(({ meetingIdFromRoute = null }, ref) => {
   };
 
   const leaveMeeting = async () => {
-    if (!activeMeeting) return;
+    const meetingId = activeMeeting?.meetingId || meetingIdFromRoute;
+    routeJoinRef.current = null;
+    cleanupMedia();
+    setIsInMeeting(false);
+    setActiveMeeting(null);
+    navigate('/chat?tab=meetings', { replace: true });
 
     try {
-      await api.post(`/meetings/${activeMeeting.meetingId}/leave`);
-      socketService.emit('leave_meeting', { meetingId: activeMeeting.meetingId });
-      
-      cleanupMedia();
-      setIsInMeeting(false);
-      setActiveMeeting(null);
-      navigate('/chat?tab=meetings');
-      fetchMeetings();
+      if (meetingId) {
+        await api.post(`/meetings/${meetingId}/leave`);
+        await emitMeetingEvent('leave_meeting', { meetingId });
+      }
     } catch (error) {
       console.error('Error leaving meeting:', error);
+      toast({
+        title: 'Meeting left locally',
+        description: 'The meeting screen closed, but the server could not confirm your leave event.',
+        variant: 'error'
+      });
+    } finally {
+      void fetchMeetings();
     }
   };
 
   const endMeeting = async () => {
-    if (!activeMeeting) return;
+    const meetingId = activeMeeting?.meetingId || meetingIdFromRoute;
+    if (!meetingId) return;
 
     try {
-      await api.post(`/meetings/${activeMeeting.meetingId}/end`);
+      await api.post(`/meetings/${meetingId}/end`);
       cleanupMedia();
       setIsInMeeting(false);
       setActiveMeeting(null);
-      navigate('/chat?tab=meetings');
-      fetchMeetings();
+      routeJoinRef.current = null;
+      navigate('/chat?tab=meetings', { replace: true });
+      void fetchMeetings();
     } catch (error) {
       console.error('Error ending meeting:', error);
     }
   };
 
+  const emitMeetingEvent = async (event, payload) => {
+    try {
+      await socketService.connect({
+        waitForConnection: true,
+        timeoutMs: 4000
+      });
+      return socketService.emit(event, payload);
+    } catch (error) {
+      console.warn(`Meeting realtime event skipped: ${event}`, error);
+      return false;
+    }
+  };
+
   const initializeMedia = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setIsAudioEnabled(false);
+      setIsVideoEnabled(false);
+      toast({
+        title: 'Joined without media',
+        description: 'This browser cannot access camera or microphone devices.',
+        variant: 'info'
+      });
+      return;
+    }
+
+    const attachStream = (stream) => {
+      localStreamRef.current = stream;
+      setIsAudioEnabled(stream.getAudioTracks().some((track) => track.enabled));
+      setIsVideoEnabled(stream.getVideoTracks().some((track) => track.enabled));
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+    };
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true
       });
-
-      localStreamRef.current = stream;
-      
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
+      attachStream(stream);
+    } catch (error) {
+      if (error?.name === 'NotFoundError' || error?.name === 'DevicesNotFoundError') {
+        try {
+          const audioOnlyStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          attachStream(audioOnlyStream);
+          toast({
+            title: 'Joined audio only',
+            description: 'No camera was found on this device.',
+            variant: 'info'
+          });
+          return;
+        } catch (audioError) {
+          setIsAudioEnabled(false);
+          setIsVideoEnabled(false);
+          toast({
+            title: 'Joined without media',
+            description: 'No camera or microphone was found on this device.',
+            variant: 'info'
+          });
+          return;
+        }
       }
 
-      // Initialize WebRTC peer connections for other participants
-      // This is a simplified version - full WebRTC implementation would be more complex
-    } catch (error) {
       console.error('Error accessing media devices:', error);
+      setIsAudioEnabled(false);
+      setIsVideoEnabled(false);
       toast({
         title: 'Media access blocked',
-        description: 'Could not access camera/microphone. Please check permissions.',
+        description: 'Could not access camera/microphone. You can still stay in the meeting.',
         variant: 'error'
       });
     }

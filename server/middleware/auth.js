@@ -261,6 +261,47 @@ const touchSession = async (session, req) => {
   Object.assign(session, nextSession);
 };
 
+const updateRequestSessionDeviceId = async (req, nextDeviceId) => {
+  const normalizedDeviceId = typeof nextDeviceId === 'string' && nextDeviceId.trim()
+    ? nextDeviceId.trim()
+    : null;
+
+  if (!req?.session || !normalizedDeviceId || req.session.deviceId === normalizedDeviceId) {
+    if (normalizedDeviceId) {
+      req.deviceId = normalizedDeviceId;
+    }
+    return;
+  }
+
+  if (typeof req.session.save === 'function') {
+    req.session.deviceId = normalizedDeviceId;
+    await req.session.save();
+    await cacheSessionRecord(req.session);
+  } else if (req.session.tokenHash) {
+    const nextSession = {
+      ...req.session,
+      deviceId: normalizedDeviceId
+    };
+
+    await Session.updateOne(
+      {
+        tokenHash: req.session.tokenHash,
+        revokedAt: null
+      },
+      {
+        $set: {
+          deviceId: normalizedDeviceId
+        }
+      }
+    );
+
+    await cacheSessionRecord(nextSession);
+    Object.assign(req.session, nextSession);
+  }
+
+  req.deviceId = normalizedDeviceId;
+};
+
 const loadUserForSessionToken = async (sessionToken) => {
   if (!sessionToken) {
     return null;
@@ -391,5 +432,6 @@ authenticateToken.requireCsrf = requireCsrf;
 authenticateToken.revokeSession = revokeSession;
 authenticateToken.resolveAuthentication = resolveAuthentication;
 authenticateToken.setSessionCookies = setSessionCookies;
+authenticateToken.updateRequestSessionDeviceId = updateRequestSessionDeviceId;
 
 module.exports = authenticateToken;

@@ -179,14 +179,10 @@ router.post('/devices/register', authenticateToken, requireCsrf, async (req, res
       keyBundle
     } = req.body;
     const userId = req.user._id;
-    const deviceId = req.deviceId || providedDeviceId || null;
+    const deviceId = providedDeviceId || req.headers['x-device-id'] || req.deviceId || null;
 
     if (!deviceId) {
       return res.status(400).json({ message: 'Device ID is required' });
-    }
-
-    if (providedDeviceId && req.deviceId && providedDeviceId !== req.deviceId) {
-      return res.status(400).json({ message: 'Device ID does not match the authenticated session.' });
     }
 
     if (!keyBundle?.encryptionPublicKey || !keyBundle?.signingPublicKey || !keyBundle?.fingerprint) {
@@ -203,6 +199,10 @@ router.post('/devices/register', authenticateToken, requireCsrf, async (req, res
         code: 'DEVICE_ID_CLAIMED',
         message: 'Device ID is already linked to another account.'
       });
+    }
+
+    if (req.deviceId !== deviceId) {
+      await authenticateToken.updateRequestSessionDeviceId(req, deviceId);
     }
 
     const existingDevice = await Device.findOne({ user: userId, deviceId }).select(

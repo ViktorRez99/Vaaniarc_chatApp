@@ -34,6 +34,14 @@ const getCookieValue = (name) => {
   return cookie ? decodeURIComponent(cookie.slice(cookiePrefix.length)) : null;
 };
 
+const clearReadableCookie = (name) => {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  document.cookie = `${name}=; Max-Age=0; path=/`;
+};
+
 const createIdempotencyKey = (prefix = "mutation") => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return `${prefix}:${crypto.randomUUID()}`;
@@ -204,6 +212,10 @@ class ApiService {
 
         // Handle specific error cases
         if (response.status === 401) {
+          if (endpoint === '/auth/verify') {
+            clearReadableCookie(CSRF_COOKIE_NAME);
+          }
+
           throw createApiError(
             data.message
             || (endpoint.includes('/auth/login') || endpoint.includes('/auth/register')

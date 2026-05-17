@@ -164,6 +164,9 @@ const disablePushNotifications = async () => {
   try {
     await api.unsubscribePushSubscription();
   } catch (error) {
+    if (error?.statusCode === 404 || error?.category === 'not_found') {
+      return;
+    }
     console.error('Failed to clear push subscription on the server:', error);
   }
 
@@ -183,6 +186,9 @@ const clearServerPushSubscription = async () => {
   try {
     await api.unsubscribePushSubscription();
   } catch (error) {
+    if (error?.statusCode === 404 || error?.category === 'not_found') {
+      return;
+    }
     console.error('Failed to remove server push subscription:', error);
   }
 };

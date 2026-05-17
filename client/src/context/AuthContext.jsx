@@ -178,10 +178,10 @@ const isMissingSessionError = (error) => /authentication required|session requir
 );
 
 const isDeviceIdClaimedError = (error) => (
-  error?.statusCode === 409
+  (error?.statusCode === 409 || error?.statusCode === 400)
   && (
     error?.responseBody?.code === 'DEVICE_ID_CLAIMED'
-    || /device id is already linked to another account/i.test(String(error?.message || ''))
+    || /device id is already linked to another account|device id does not match the authenticated session/i.test(String(error?.message || ''))
   )
 );
 
