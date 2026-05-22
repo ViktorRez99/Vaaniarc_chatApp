@@ -3,6 +3,8 @@ const { installSafeConsole } = require('./utils/safeConsole');
 installSafeConsole();
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -63,6 +65,12 @@ const {
 
 const app = express();
 const requireCsrf = authenticateToken.requireCsrf;
+const clientDistPath = path.resolve(__dirname, '..', 'client', 'dist');
+const clientIndexPath = path.join(clientDistPath, 'index.html');
+const shouldServeClient = process.env.NODE_ENV === 'production'
+  || String(process.env.SERVE_CLIENT || '').toLowerCase() === 'true';
+const clientBuildAvailable = shouldServeClient && fs.existsSync(clientIndexPath);
+
 app.use((req, res, next) => {
   const incomingRequestId = req.headers['x-request-id'] || req.headers['x-amzn-trace-id'];
   req.requestId = typeof incomingRequestId === 'string' && incomingRequestId.trim()
@@ -134,12 +142,12 @@ app.use(helmet({
       connectSrc: cspConnectSources,
       fontSrc: ["'self'", 'data:'],
       frameAncestors: ["'self'"],
-      imgSrc: ["'self'", 'data:', 'blob:'],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https://api.dicebear.com'],
       manifestSrc: ["'self'"],
       objectSrc: ["'none'"],
       scriptSrc: isDevelopment
         ? ["'self'", "'unsafe-eval'", "'unsafe-inline'"]
-        : ["'self'"],
+        : ["'self'", "'wasm-unsafe-eval'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       workerSrc: ["'self'", 'blob:']
     }
@@ -1495,30 +1503,42 @@ app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, roomRo
 app.use('/api', authenticateToken, requireCsrf, requirePasskeyEnrollment, meetingRoutes);
 
 app.use(/^\/api(?:\/.*)?$/, notFoundHandler);
-app.use(errorHandler);
 
-app.get('/', (req, res) => {
-  res.json({
-    message: 'VaaniArc API Server',
-    version: '1.0.0',
-    status: 'running',
-    endpoints: {
-      auth: '/api/auth',
-      chats: '/api/chats',
-      conversations: '/api/conversations',
-      channels: '/api/channels',
-      communities: '/api/communities',
-      rooms: '/api/rooms',
-      upload: '/api/upload',
-      meetings: '/api/meetings',
-      keys: '/api/keys',
-      notifications: '/api/notifications',
-      twoFactor: '/api/2fa',
-      devices: '/api/devices',
-      health: '/api/health'
-    }
+if (clientBuildAvailable) {
+  app.use(express.static(clientDistPath, {
+    index: false,
+    maxAge: '1d'
+  }));
+
+  app.get(/^(?!\/api(?:\/|$)|\/socket\.io(?:\/|$)|\/uploads(?:\/|$)).*/, (req, res) => {
+    res.sendFile(clientIndexPath);
   });
-});
+} else {
+  app.get('/', (req, res) => {
+    res.json({
+      message: 'VaaniArc API Server',
+      version: '1.0.0',
+      status: 'running',
+      endpoints: {
+        auth: '/api/auth',
+        chats: '/api/chats',
+        conversations: '/api/conversations',
+        channels: '/api/channels',
+        communities: '/api/communities',
+        rooms: '/api/rooms',
+        upload: '/api/upload',
+        meetings: '/api/meetings',
+        keys: '/api/keys',
+        notifications: '/api/notifications',
+        twoFactor: '/api/2fa',
+        devices: '/api/devices',
+        health: '/api/health'
+      }
+    });
+  });
+}
+
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 3000;
 

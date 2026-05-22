@@ -1,5 +1,5 @@
 {
-  "name": "realtime-chat-app",
+  "name": "vaani-arc",
   "version": "1.0.0",
   "description": "A real-time chat application using WebSocket technology",
   "main": "server/entry.js",
@@ -25,7 +25,7 @@
     "socket.io",
     "express"
   ],
-  "author": "Your Name",
+  "author": "Abhra",
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0",
