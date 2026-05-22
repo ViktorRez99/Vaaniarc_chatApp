@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Abhra and VaaniArc TEAM
+ * All Rights Reserved.
+ * This file is part of VaaniArc and cannot be copied and/or distributed without the express permission of the owner.
+ */
+
 import { Suspense, lazy, Component, useEffect, useState } from "react"
 import { Navigate, Route, Routes, useLocation } from "react-router-dom"
 import { AnimatePresence, motion } from "framer-motion"

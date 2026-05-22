@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Abhra and VaaniArc TEAM
+ * All Rights Reserved.
+ * This file is part of VaaniArc and cannot be copied and/or distributed without the express permission of the owner.
+ */
+
 export const DISAPPEARING_MESSAGE_OPTIONS = [
   { seconds: null, label: 'Timer off', shortLabel: 'Off' },
   { seconds: 3600, label: '1 hour', shortLabel: '1h' },

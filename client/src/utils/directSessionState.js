@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Abhra and VaaniArc TEAM
+ * All Rights Reserved.
+ * This file is part of VaaniArc and cannot be copied and/or distributed without the express permission of the owner.
+ */
+
 export const DEFAULT_DIRECT_SESSION_MAX_SKIP = 64;
 export const RECEIVED_COUNTER_WINDOW_LIMIT = 128;
 

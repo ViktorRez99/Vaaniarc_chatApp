@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Abhra and VaaniArc TEAM
+ * All Rights Reserved.
+ * This file is part of VaaniArc and cannot be copied and/or distributed without the express permission of the owner.
+ */
+
 export const easeOutExpo = [0.16, 1, 0.3, 1];
 export const easeInBack = [0.36, 0, 0.66, -0.56];
 

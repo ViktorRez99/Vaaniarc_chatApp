@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Abhra and VaaniArc TEAM
+ * All Rights Reserved.
+ * This file is part of VaaniArc and cannot be copied and/or distributed without the express permission of the owner.
+ */
+
 export { default as Avatar } from './Avatar';
 export { default as Badge } from './Badge';
 export { default as Button, buttonVariants } from './Button';

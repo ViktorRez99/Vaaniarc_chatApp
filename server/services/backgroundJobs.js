@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Abhra and VaaniArc TEAM
+ * All Rights Reserved.
+ * This file is part of VaaniArc and cannot be copied and/or distributed without the express permission of the owner.
+ */
+
 const logger = require('../utils/logger');
 
 const DEFAULT_CONCURRENCY = Number.parseInt(process.env.BACKGROUND_JOB_CONCURRENCY || '2', 10);

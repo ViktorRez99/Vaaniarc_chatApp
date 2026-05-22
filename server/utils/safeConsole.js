@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2026 Abhra and VaaniArc TEAM
+ * All Rights Reserved.
+ * This file is part of VaaniArc and cannot be copied and/or distributed without the express permission of the owner.
+ */
+
 const SENSITIVE_KEY_PATTERN = /authorization|cookie|csrf|credential|otp|passkey|password|secret|session|token|totp|key/i;
 
 const sanitizeError = (error) => ({
