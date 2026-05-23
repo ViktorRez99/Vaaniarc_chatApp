@@ -45,8 +45,9 @@ In collaborative environments (e.g., updating a group description, mutating user
 - The server throws a `409 Conflict` (Version Conflict) and prompts Admin B to refresh the latest state before applying their changes.
 
 ## 3. Shamir's Secret Sharing (Account Escrow)
-*Refer to `encryption-and-recovery.md` for cryptographic details.*
+*Refer to `account-recovery.md` for the complete Shamir's formulation and recovery process, and `end-to-end-encryption.md` for post-quantum details.*
 VaaniArc allows users to recover their encryption keys without a password by utilizing Shamir's algorithm. To ensure zero-knowledge proofs on the backend:
-- The device splits the Master Key locally in memory.
+- The device splits the Master Key locally in memory using mathematical polynomial formulas.
 - The shards are encrypted with trusted friends' public keys *before* ever leaving the device.
-- The server stores the heavily encrypted, opaque shards and only releases them when a recovery challenge is successfully authorized by the trusted friends.
+- The server stores the heavily encrypted, opaque shards (`shardEnvelopeSchema`) and only releases them when a recovery challenge is successfully authorized by the trusted friends.
+- Once the user retrieves enough shards to reach the threshold `K`, their local client applies Lagrange Interpolation to perfectly reconstruct the original keys without the central server ever seeing them.
