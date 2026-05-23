@@ -43,7 +43,7 @@ graph TD
     NoteA --> E2[(Encrypted Envelope 2)]:::server
     NoteA --> E3[(Encrypted Envelope 3)]:::server
     
-    E1 --> Server[VaaniArc Server (MongoDB `RecoveryKit`)]:::server
+    E1 --> Server["VaaniArc Server (MongoDB RecoveryKit)"]:::server
     E2 --> Server
     E3 --> Server
 ```
